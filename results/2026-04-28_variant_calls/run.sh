@@ -16,22 +16,173 @@ set -eou pipefail
 set -x
   
 
-## Conda 
-export JAVA_HOME="/hpc/packages/minerva-rocky9/java/21.0.4/jdk-21.0.4"
-export JAVA_LD_LIBRARY_PATH="${JAVA_HOME}/lib"
-eval "$(micromamba shell hook --shell bash)"
+# --- Conda ---
+source "/hpc/packages/minerva-rocky9/miniforge3/26.1.1-3/miniforge/etc/profile.d/conda.sh"
 
-module load micromamba/1.5.3-0
+
 
 # load module and environment; export this environment into a yml file and add to the repo for reproducibility; conda env export --name variant_calls > variant_calls_env.yml
 
-module load deepvariant/1.9.0
-module
+
 
 ## Directories 
 data=/sc/arion/work/willij115/projects/HAI/data/2026-04-28_variant_calls
+data1=/sc/arion/work/willij115/projects/HAI/data/2026-04-23_align_pacbio_reads_to_reference
 scratch=/sc/arion/scratch/willij115/projects/HAI/2026-04-28_variant_calls
 results=/sc/arion/work/willij115/projects/HAI/results/2026-04-28_variant_calls
 results1=/sc/arion/work/willij115/projects/HAI/results/2026-04-23_align_pacbio_reads_to_reference
 
 
+##functions
+
+##1 call variants with deepvariant
+make_bed_file () {
+    cat <<EOF > "${data}/ig_loci.bed"
+chr2	88807162	90310090	igk
+chr22	22414484	23392002	igl
+igh	0	1193129	igh
+ighc	0	401750	
+EOF
+}
+
+call_variants_w_deepvariant () {    
+
+    module load singularity/3.11.0
+    module load deepvariant/1.9.0
+
+    mkdir -p "${results}/deep_variants"
+
+    for file in "${results1}"/*.sorted.bam ; do
+        sample_name=$(basename "$file" .sorted.bam)
+
+        singularity exec \
+            --cleanenv \
+            --no-home \
+            -B "${results1}:${results1},${results}:${results},${data1}:${data1},${data}:${data}" \
+            "$DEEPVARIANT_SIF" \
+            /opt/deepvariant/bin/run_deepvariant \
+            --model_type=PACBIO \
+            --ref="${data1}/reference.fasta" \
+            --reads="${file}" \
+            --regions="${data}/ig_loci.bed" \
+            --output_vcf="${results}/deep_variants/${sample_name}.vcf.gz" \
+            --output_gvcf="${results}/deep_variants/${sample_name}.g.vcf.gz" \
+             --sample_name="$sample_name" \
+            --num_shards=${LSB_DJOB_NUMPROC:-8}
+
+    done
+
+    module purge
+
+}
+
+
+
+
+merge_vcf_files () {
+
+    module load singularity/3.11.0
+    module load glnexus
+
+    mkdir -p "${results}/deep_variants_merged"
+
+    gvcfs=$(ls "${results}/deep_variants/"*.g.vcf.gz)
+
+    # clean previous GLnexus run
+    rm -rf GLnexus.DB
+
+    singularity exec \
+        -B "${results}/deep_variants:/data,${data}:/bed" \
+        docker://quay.io/mlin/glnexus:v1.2.2 \
+        glnexus_cli \
+        --config DeepVariantWGS \
+        --bed /bed/ig_loci.bed \
+        $gvcfs \
+    | bcftools view - | bgzip -c > "${results}/deep_variants_merged/deepvariant.cohort.vcf.gz"
+
+    module purge
+}
+
+##2 call variants with IGentotyper
+
+index_bam_files () { 
+    #sample download only came with .pbi files, so we need to index the bam files before we can use them for downstream analyses
+    module load samtools
+
+    for file in "${data}/samples"/*.bam ; do
+        samtools index "$file"
+    done
+
+    module purge samtools
+}
+
+
+align_raw_pacbio_bam_files_to_reference () {
+
+    #need an aligned bam file to use for IGentotyper, so we will align the raw pacbio bam files to the reference using pbmm2
+    conda activate pbmm2_env
+
+    mkdir -p "${scratch}/aligned_bams"
+
+    for file in "${data}/samples"/*.bam ; do
+        sample_name=$(basename "$file" .bam)
+        pbmm2 align \
+            --preset SUBREAD --sort -j 4 -J 4 \
+            "${data1}/reference.fasta" \
+            "$file" \
+            "${scratch}/aligned_bams/${sample_name}.sorted.bam"
+    done
+
+}
+
+
+
+create_reference_sa_index () {
+
+    #IGentotyper needs the reference genome to be indexed with sawriter, so we will create the index and copy the reference fasta and index files to the IGenotyper data directory
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u
+    
+    sawriter ${data1}/reference.fasta 
+    cp ${data1}/reference.fasta* /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/
+   
+    
+}
+
+
+phase_bam_files_w_igenotyper () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u
+    
+
+    for file in "${data}/samples"/*.bam; do
+        sample=$(basename "$file" .bam)
+        outdir="${scratch}/phased_bams/${sample}"
+        mkdir -p "$outdir"
+        IG phase "$file" "$outdir" --threads 8
+    done
+
+    
+}
+
+
+
+
+
+##function calls
+
+#make_bed_file
+#call_variants_w_deepvariant
+#merge_vcf_files
+#index_bam_files
+align_raw_pacbio_bam_files_to_reference
+#create_reference_sa_index
+#phase_bam_files_w_igenotyper

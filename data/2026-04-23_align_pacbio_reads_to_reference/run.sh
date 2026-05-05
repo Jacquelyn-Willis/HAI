@@ -77,4 +77,5 @@ get_ref_fasta () {
 #get_index_and_manifest_file 
 #parse_files
 #download_files index_filtered.std.index ${scratch} HTTP
-get_ref_fasta
+#get_ref_fasta
+
