@@ -105,37 +105,17 @@ merge_vcf_files () {
 
 ##2 call variants with IGentotyper
 
+
 index_bam_files () { 
     #sample download only came with .pbi files, so we need to index the bam files before we can use them for downstream analyses
     module load samtools
 
-    for file in "${data}/samples"/*.bam ; do
+    for file in "${scratch}/aligned_bams"/*.bam ; do
         samtools index "$file"
     done
 
     module purge samtools
 }
-
-
-align_raw_pacbio_bam_files_to_reference () {
-
-    #need an aligned bam file to use for IGentotyper, so we will align the raw pacbio bam files to the reference using pbmm2
-    conda activate pbmm2_env
-
-    mkdir -p "${scratch}/aligned_bams"
-
-    for file in "${data}/samples"/*.bam ; do
-        sample_name=$(basename "$file" .bam)
-        pbmm2 align \
-            --preset SUBREAD --sort -j 4 -J 4 \
-            "${data1}/reference.fasta" \
-            "$file" \
-            "${scratch}/aligned_bams/${sample_name}.sorted.bam"
-    done
-
-}
-
-
 
 create_reference_sa_index () {
 
@@ -146,7 +126,7 @@ create_reference_sa_index () {
     conda activate /sc/arion/work/willij115/test_env/envs/IGv2
     set -u
     
-    sawriter ${data1}/reference.fasta 
+    #sawriter ${data1}/reference.fasta 
     cp ${data1}/reference.fasta* /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/
    
     
@@ -160,8 +140,15 @@ phase_bam_files_w_igenotyper () {
 
     set +u
     conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u
+    set -u    
+
+    module load minimap2
     
+    sed -i -e '/chr7_.*/d' /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/target_regions.bed
+
+    rm -r "${scratch}/phased_bams"
+    mkdir -p "${scratch}/phased_bams"
+
 
     for file in "${data}/samples"/*.bam; do
         sample=$(basename "$file" .bam)
@@ -175,6 +162,22 @@ phase_bam_files_w_igenotyper () {
 
 
 
+assemble_bam_files_w_igenotyper () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u    
+
+    for sample_dir in "${scratch}/phased_bams"/*/; do
+        sample=$(basename "${sample_dir%/}")
+        IG assembly "$sample_dir" --threads 8
+    done
+
+
+}
 
 
 ##function calls
@@ -182,7 +185,8 @@ phase_bam_files_w_igenotyper () {
 #make_bed_file
 #call_variants_w_deepvariant
 #merge_vcf_files
+#align_raw_pacbio_bam_files_to_reference
 #index_bam_files
-align_raw_pacbio_bam_files_to_reference
 #create_reference_sa_index
 #phase_bam_files_w_igenotyper
+assemble_bam_files_w_igenotyper
