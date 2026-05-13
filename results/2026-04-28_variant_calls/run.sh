@@ -182,9 +182,9 @@ phase_bam_files_w_igenotyper_oscar () {
         sample=$(basename "$file" .bam)
         outdir="${scratch}/phased_bams/${sample}"
         mkdir -p "$outdir"
-        #bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "variant_calls.%J.out.txt" -e "variant_calls.%J.err.txt"  \
+        #bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls.${sample}.out.txt" -e "${outdir}/variant_calls.${sample}.err.txt"  \
         #IG phase "$file" "$outdir" --threads 8
-        #bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "variant_calls.%J.out.txt" -e "variant_calls.%J.err.txt"  \
+        #bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls.${sample}.out.txt" -e "${outdir}/variant_calls.${sample}.err.txt"  \
         #IG assembly "$outdir" --threads 8
     done
 
