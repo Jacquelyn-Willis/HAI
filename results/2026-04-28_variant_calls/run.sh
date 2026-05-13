@@ -161,6 +161,35 @@ phase_bam_files_w_igenotyper () {
 }
 
 
+phase_bam_files_w_igenotyper_oscar () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u    
+
+    module load minimap2
+    
+    sed -i -e '/chr7_.*/d' /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/target_regions.bed
+
+    rm -r "${scratch}/phased_bams"
+    mkdir -p "${scratch}/phased_bams"
+
+
+    for file in "${data}/samples"/*.bam; do
+        sample=$(basename "$file" .bam)
+        outdir="${scratch}/phased_bams/${sample}"
+        mkdir -p "$outdir"
+        #bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "variant_calls.%J.out.txt" -e "variant_calls.%J.err.txt"  \
+        #IG phase "$file" "$outdir" --threads 8
+        #bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "variant_calls.%J.out.txt" -e "variant_calls.%J.err.txt"  \
+        #IG assembly "$outdir" --threads 8
+    done
+
+    
+}
 
 assemble_bam_files_w_igenotyper () {
 
