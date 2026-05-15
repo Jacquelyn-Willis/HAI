@@ -6,8 +6,8 @@
 #BSUB -R "rusage[mem=10000]"             # 10 GB per core → 80 GB total
 #BSUB -R "span[hosts=1]"                # All cores on the same node
 #BSUB -W 12:00                          # 85 hour wall-time limit
-#BSUB -o pacbio_reads   .%J.out       # STDOUT log
-#BSUB -eo pacbio_reads   .%J.err      # STDERR log
+#BSUB -o pacbio_reads   .%J.out.txt       # STDOUT log
+#BSUB -eo pacbio_reads   .%J.err.txt      # STDERR log
 #BSUB -L /bin/bash
 
 
