@@ -526,6 +526,58 @@ PY
 }
 
 
+
+
+
+##5. Histogram of read coverage across IG loci for each sample to identify SV from phased and assembled contigs from IGentotyper
+
+
+
+make_SV_bed_file () {
+    cat <<EOF > "${data}/SV_ig_loci.bed"
+igh	157688	167669	IGHV7-4-1.CH17
+igh	210158	257471	IGHV5-10-1.CH17
+igh	394658	426627	IGHV3-23.region.ABC9
+igh	484922	559858	IGHV3-30.region.ABC11
+igh	609413	682906	IGHV4-38-2.region.mixFosmids
+igh	955770	1033787	IGHV1-69.region.CH17
+igh	1149129	1194129	IGHV1-8.GRCh37
+EOF
+}
+
+
+phased_histogram_of_read_coverage_across_IG_loci_for_each_sample () {
+    # here we can add code to analyze the output from IGentotyper, such as calculating the read coverage across the IG loci for each sample and plotting a histogram to identify potential SVs
+    module load samtools
+
+    for SAMPLE_DIR in "${scratch}/igenotyper_run"/*; do
+        [ -d "$SAMPLE_DIR" ] || continue
+        SAMPLE=$(basename "$SAMPLE_DIR")
+
+        BAM=$(find "$SAMPLE_DIR/alignments/" -name "contigs_to_ref_phased.sorted.bam" 2>/dev/null | head -1)
+        [ -z "$BAM" ] && continue
+
+        while read chr start end name; do
+            igh_region="${chr}:${start}-${end}"
+            samtools coverage --histogram --region "$igh_region" --plot-depth "$BAM" > "${SAMPLE_DIR}/${name}_coverage.txt"
+        done < "${data}/SV_ig_loci.bed"
+    done
+
+    module purge
+}
+
+
+make_SV_bed_file
+phased_histogram_of_read_coverage_across_IG_loci_for_each_sample
+
+
+
+
+
+
+
+
+
 ##function calls 
 
 #make_bed_file
@@ -546,4 +598,4 @@ PY
 #plot_merged_vcf_summary "${scratch}/merged_vcf_summary.tsv" "${scratch}/merged_vcf_summary.png"
 
 #count_snps_per_sample_for_IG_loci
-plot_ig_locus_summary
+#plot_ig_locus_summary
