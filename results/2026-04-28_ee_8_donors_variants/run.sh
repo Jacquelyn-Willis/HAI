@@ -1,13 +1,13 @@
 #!/bin/bash
 #BSUB -J variant_calls                # Job name
 #BSUB -P acc_oscarlr                    # Project allocation
-#BSUB -q express                       # Queue name
+#BSUB -q express                  # Queue name
 #BSUB -n 8                              # 8 compute cores
-#BSUB -R "rusage[mem=10000]"             # 10 GB per core → 80 GB total
+#BSUB -R "rusage[mem=50000]"             # 10 GB per core → 80 GB total
 #BSUB -R "span[hosts=1]"                # All cores on the same node
 #BSUB -W 12:00                          # 85 hour wall-time limit
-#BSUB -o variant_calls.%J.out       # STDOUT log
-#BSUB -eo variant_calls.%J.err      # STDERR log
+#BSUB -o "variant_calls.%J.out.txt"       # STDOUT log
+#BSUB -eo "variant_calls.%J.err.txt"      # STDERR log
 #BSUB -L /bin/bash
 
 
@@ -38,7 +38,7 @@ results1=/sc/arion/work/willij115/projects/HAI/results/2026-04-23_align_pacbio_r
 ##1 call variants with deepvariant
 
 
-align_bam_files_to_reference_for_deepvariant_input () {
+align_bam_files_to_reference_for_deepvariant_input123 () {
 
     conda activate /sc/arion/work/willij115/test_env/envs/pbmm2_env
 
@@ -59,15 +59,46 @@ align_bam_files_to_reference_for_deepvariant_input () {
                 -q express \
                 -n 8 \
                 -W 12:00 \
-                -R "rusage[mem=100000] span[hosts=1]" \
+                -R "rusage[mem=50000] span[hosts=1]" \
                 -o "${scratch}/aligned_bams/pbmm2_align.${sample_name}.%J.out.txt" \
                 -e "${scratch}/aligned_bams/pbmm2_align.${sample_name}.%J.err.txt"  \
-                "pbmm2 align  "${scratch}/ref.mmi"  "$file" "${scratch}/aligned_bams/${sample_name}_aligned.sorted.bam"  --sort -j 8"
+                pbmm2 align  "${scratch}/ref.mmi"  "$file" "${scratch}/aligned_bams/${sample_name}_aligned.sorted.bam"  --sort -j 8
 
     done
 
 }
 
+align_bam_files_to_reference_for_deepvariant_input () {
+
+    conda activate /sc/arion/work/willij115/test_env/envs/pbmm2_env
+
+    rm -rf "${scratch}/aligned_bams"
+    mkdir -p "${scratch}/aligned_bams"
+
+    for file in "${data}"/samples/*.bam ; do
+        local sample_name
+        sample_name=$(basename "$file" .bam)
+
+        echo "Aligning ${sample_name}..."
+
+        bsub -J "pbmm2_${sample_name}" \
+             -P acc_oscarlr \
+             -q express \
+             -n 8 \
+             -W 12:00 \
+             -R "rusage[mem=50000] span[hosts=1]" \
+             -o "${scratch}/aligned_bams/pbmm2_align.${sample_name}.%J.out.txt" \
+             -e "${scratch}/aligned_bams/pbmm2_align.${sample_name}.%J.err.txt" \
+             bash -lc "
+                 set -euo pipefail
+                 export TMPDIR='${scratch}/tmp/${sample_name}'
+                 mkdir -p \"\$TMPDIR\"
+                 pbmm2 align '${scratch}/ref.mmi' '$file' \
+                     '${scratch}/aligned_bams/${sample_name}_aligned.sorted.bam' \
+                     --sort -j 8
+             "
+    done
+}
 
 make_bed_file () {
     cat <<EOF > "${data}/ig_loci.bed"
@@ -80,26 +111,30 @@ EOF
 
 call_variants_w_deepvariant () {    
 
+    # call in SLEEP job
+
     module load singularity/3.11.0
     module load deepvariant/1.9.0
 
-    mkdir -p "${results}/deep_variant_calls"
+    rm -rf "${scratch}/deep_variant_calls"
+    mkdir -p "${scratch}/deep_variant_calls"
 
     for file in "${scratch}/aligned_bams"/*_aligned.sorted.bam ; do
         sample_name=$(basename "$file" _aligned.sorted.bam)
 
+
         singularity exec \
             --cleanenv \
             --no-home \
-            -B "${results1}:${results1},${results}:${results},${data1}:${data1},${data}:${data}" \
+            -B "${results1}:${results1},${results}:${results},${data1}:${data1},${data}:${data},${scratch}:${scratch}" \
             "$DEEPVARIANT_SIF" \
             /opt/deepvariant/bin/run_deepvariant \
             --model_type=PACBIO \
             --ref="${data1}/reference.fasta" \
             --reads="${file}" \
             --regions="${data}/ig_loci.bed" \
-            --output_vcf="${results}/deep_variant_calls/${sample_name}.vcf.gz" \
-            --output_gvcf="${results}/deep_variants/${sample_name}.g.vcf.gz" \
+            --output_vcf="${scratch}/deep_variant_calls/${sample_name}.vcf.gz" \
+            --output_gvcf="${scratch}/deep_variant_calls/${sample_name}.g.vcf.gz" \
              --sample_name="$sample_name" \
             --num_shards=${LSB_DJOB_NUMPROC:-8}
 
@@ -110,28 +145,29 @@ call_variants_w_deepvariant () {
 }
 
 
-
-
 merge_deepvariant_vcf_files () {
 
     module load singularity/3.11.0
-    module load glnexus
+    module load bcftools
+    module load htslib
 
-    mkdir -p "${results}/deepvariants_merged"
-
-    gvcfs=$(ls "${results}/deep_variant_calls/"*.g.vcf.gz)
-
-    # clean previous GLnexus run
+    mkdir -p "${results}/deepvariants_merged_new_bam"
     rm -rf GLnexus.DB
 
+    # 1. Get just the filenames and add the /data/ prefix to them
+    gvcfs=$(cd "${results}/deep_variant_calls" && ls *.g.vcf.gz | sed 's|^|/data/|')
+
+    # 2. Run Singularity normally
     singularity exec \
-        -B "${results}/deep_variants:/data,${data}:/bed" \
-        docker://quay.io/mlin/glnexus:v1.2.2 \
+        -B "${results}/deep_variant_calls:/data,${data}:/bed" \
+        "/hpc/users/willij115/glnexus_v1.2.2.sif" \
         glnexus_cli \
         --config DeepVariantWGS \
         --bed /bed/ig_loci.bed \
         $gvcfs \
-    | bcftools view - | bgzip -c > "${results}/deepvariants_merged/deepvariant.cohort.vcf.gz"
+    | bcftools view - | bgzip -c > "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"
+
+    bcftools index -t "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"
 
     module purge
 }
@@ -139,173 +175,20 @@ merge_deepvariant_vcf_files () {
 
 
 
-##2 call variants with IGentotyper
-
-index_bam_files () { 
-    #sample download only came with .pbi files, so we need to index the bam files before we can use them for downstream analyses
-    module load samtools
-
-    for file in "${scratch}/aligned_bams"/*.bam ; do
-        samtools index "$file"
-    done
-
-    module purge samtools
-}
-
-create_and_copy_reference_sa_index () {
-
-    #IGentotyper needs the reference genome to be indexed with sawriter, so we will create the index and copy the reference fasta and index files to the IGenotyper data directory
-    export SJOB_DEFALLOC=NONE
-
-    set +u
-    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u
-    
-    #sawriter ${data1}/reference.fasta 
-    cp ${data1}/reference.fasta* /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/
-   
-    
-}
-
-
-phase_bam_files_w_igenotyper () {
-
-    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
-    export SJOB_DEFALLOC=NONE
-
-    set +u
-    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u    
-
-    module load minimap2
-    
-    sed -i -e '/chr7_.*/d' /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/target_regions.bed
-
-    rm -r "${scratch}/igenotyper_run"
-    mkdir -p "${scratch}/igenotyper_run"
-
-
-    for file in "${data}/samples"/*.bam; do
-        sample=$(basename "$file" .bam)
-        outdir="${scratch}/igenotyper_run/${sample}"
-        mkdir -p "$outdir"
-        bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls.${sample}.%J.out.txt" -e "${outdir}/variant_calls.${sample}.%J.err.txt"  \
-        IG phase "$file" "$outdir" --threads 8
-       
-    done
-
-    
-}
-
-phase_bam_files_w_igenotyper_repeat () {
-
-    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
-    export SJOB_DEFALLOC=NONE
-
-    set +u
-    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u    
-
-    module load minimap2
-    
-    sed -i -e '/chr7_.*/d' /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/target_regions.bed
-
-
-    for file in "${data}/samples/m64152e_230602_034553.bc1046--bc1046.bam" "${data}/samples/m64407e_230722_040625.bc1057--bc1057.bam"; do
-        sample=$(basename "$file" .bam)
-        outdir="${scratch}/igenotyper_run/${sample}"
-        mkdir -p "$outdir"
-        bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls_phase.${sample}.%J.out.txt" -e "${outdir}/variant_calls_phase.${sample}.%J.err.txt"  \
-        IG phase "$file" "$outdir" --threads 8 --tmp "${scratch}/igenotyper_run/${sample}/tmp_final"
-       
-    done
-
-    
-}
-    
-
-assemble_bam_files_w_igenotyper () {
-
-    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
-    export SJOB_DEFALLOC=NONE
-
-    set +u
-    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u    
-
-    for file in "${data}/samples"/*.bam; do
-            sample=$(basename "$file" .bam)
-            outdir="${scratch}/igenotyper_run/${sample}"
-            mkdir -p "$outdir"
-            bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls_assembly.${sample}.%J.out.txt" -e "${outdir}/variant_calls_assembly.${sample}.%J.err.txt"  \
-            IG assembly "$outdir" --threads 8
-    done
-
-}
 
 
 
-IG_detect_w_igenotyper () {
-
-    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
-    export SJOB_DEFALLOC=NONE
-
-    set +u
-    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u    
-
-    for file in "${data}/samples"/*.bam; do
-            sample=$(basename "$file" .bam)
-            outdir="${scratch}/igenotyper_run/${sample}"
-            mkdir -p "$outdir"
-            bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls_detect.${sample}.%J.out.txt" -e "${outdir}/variant_calls_detect.${sample}.%J.err.txt"  \
-            IG detect "$outdir" 
-    done
-
-
-}
-
-IG_detect_w_igenotyper_wo_2_samples () {
-
-    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
-    export SJOB_DEFALLOC=NONE
-
-    set +u
-    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
-    set -u   
-
-    for file in "${data}/samples"/*.bam; do
-        sample=$(basename "$file" .bam)
-
-        # skip these samples
-        if [[ "$sample" == "m64152e_230602_034553.bc1046--bc1046" || "$sample" == "m64407e_230722_040625.bc1057--bc1057" ]]; then
-            continue
-        fi
-
-        outdir="${scratch}/igenotyper_run/${sample}"
-        mkdir -p "$outdir"
-
-        bsub -J "variant_calls" \
-            -P acc_oscarlr \
-            -q express \
-            -n 8 \
-            -W 12:00 \
-            -R "rusage[mem=100000] span[hosts=1]" \
-            -o "${outdir}/variant_calls_detect.${sample}.%J.out.txt" \
-            -e "${outdir}/variant_calls_detect.${sample}.%J.err.txt" \
-            IG detect "$outdir" 
-    done
-}
 
 
 
-## 3. Analyze deep variant output 
+
+## 2. Analyze deep variant output 
 
 get_vcf_stats_of_deepvariant_output () {
     # here we can add code to analyze the output from deepvariant, such as calculating the number of variants called, the distribution of variant types, etc.
     module load bcftools
 
-    bcftools stats "${results}/deep_variants_merged/deepvariant.cohort.vcf.gz" > "${scratch}/deepvariant.cohort.vcf.stats.txt"
+    bcftools stats "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz" > "${scratch}/deepvariant.cohort.vcf.stats.txt"
 
 
     module purge
@@ -467,9 +350,229 @@ PY
 
 
 
+#summarize_merged_deepvariant_vcf_split "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"  "${scratch}/merged_vcf_summary_split_new_bam.tsv"
+#plot_merged_deepvariant_vcf_summary "${scratch}/merged_vcf_summary_split_new_bam.tsv" "${scratch}/merged_vcf_summary_split_new_bam.png"
+
+
+
+
+
+
+
+
+##3 call variants with IGentotyper
+
+index_bam_files () { 
+    #sample download only came with .pbi files, so we need to index the bam files before we can use them for downstream analyses
+    module load samtools
+
+    for file in "${scratch}/aligned_bams"/*.bam ; do
+        samtools index "$file"
+    done
+
+    module purge samtools
+}
+
+create_and_copy_reference_sa_index () {
+
+    #IGentotyper needs the reference genome to be indexed with sawriter, so we will create the index and copy the reference fasta and index files to the IGenotyper data directory
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u
+    
+    #sawriter ${data1}/reference.fasta 
+    cp ${data1}/reference.fasta* /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/
+   
+    
+}
+
+
+phase_bam_files_w_igenotyper () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u    
+
+    module load minimap2
+    
+    #sed -i -e '/chr7_.*/d' /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/target_regions.bed
+
+    rm -r "${scratch}/igenotyper_run"
+    mkdir -p "${scratch}/igenotyper_run"
+
+
+    for file in "${data}/samples"/*.bam; do
+        sample=$(basename "$file" .bam)
+        outdir="${scratch}/igenotyper_run/${sample}"
+        mkdir -p "$outdir"
+        bsub -J "variant_calls_phase" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=50000] span[hosts=1]" -o "${outdir}/variant_calls_phase.${sample}.%J.out.txt" -e "${outdir}/variant_calls_phase.${sample}.%J.err.txt"  \
+        IG phase "$file" "$outdir" --threads 8 --tmp "${scratch}/igenotyper_run/${sample}/tmp_final"
+       
+    done
+
+    
+}
+
+
+
+
+
+
+
+phase_bam_files_w_igenotyper_repeat () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u    
+
+    module load minimap2
+    
+    sed -i -e '/chr7_.*/d' /sc/arion/work/willij115/test_env/envs/IGv2/lib/python2.7/site-packages/IGenotyper-1.1-py2.7.egg/IGenotyper/data/target_regions.bed
+
+
+    for file in "${data}/samples/m64152e_230602_034553.bc1046--bc1046.bam" "${data}/samples/m64407e_230722_040625.bc1057--bc1057.bam"; do
+        sample=$(basename "$file" .bam)
+        outdir="${scratch}/igenotyper_run/${sample}"
+        mkdir -p "$outdir"
+        bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls_phase.${sample}.%J.out.txt" -e "${outdir}/variant_calls_phase.${sample}.%J.err.txt"  \
+        IG phase "$file" "$outdir" --threads 8 --tmp "${scratch}/igenotyper_run/${sample}/tmp_final"
+       
+    done
+
+    
+}
+    
+
+
+
+
+
+
+assemble_bam_files_w_igenotyper () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u    
+
+    for file in "${data}/samples"/*.bam; do
+            sample=$(basename "$file" .bam)
+            outdir="${scratch}/igenotyper_run/${sample}"
+            mkdir -p "$outdir"
+            bsub -J "variant_calls_assembly" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=50000] span[hosts=1]" -o "${outdir}/variant_calls_assembly.${sample}.%J.out.txt" -e "${outdir}/variant_calls_assembly.${sample}.%J.err.txt"  \
+            IG assembly "$outdir" --threads 8 
+    done
+
+}
+
+
+
+
+
+IG_detect_w_igenotyper () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u    
+
+    for file in "${data}/samples"/*.bam; do
+            sample=$(basename "$file" .bam)
+            outdir="${scratch}/igenotyper_run/${sample}"
+            mkdir -p "$outdir"
+            bsub -J "variant_calls" -P acc_oscarlr -q express -n 8 -W 12:00 -R "rusage[mem=100000] span[hosts=1]" -o "${outdir}/variant_calls_detect.${sample}.%J.out.txt" -e "${outdir}/variant_calls_detect.${sample}.%J.err.txt"  \
+            IG detect "$outdir" 
+    done
+
+
+}
+
+IG_detect_w_igenotyper_wo_2_samples () {
+
+    #IGentotyper can phase variants in the bam files, so we will use it to phase the bam files and output phased bam files for downstream analyses
+    export SJOB_DEFALLOC=NONE
+
+    set +u
+    conda activate /sc/arion/work/willij115/test_env/envs/IGv2
+    set -u   
+
+    for file in "${data}/samples"/*.bam; do
+        sample=$(basename "$file" .bam)
+
+        # skip these samples
+        if [[ "$sample" == "m64152e_230602_034553.bc1046--bc1046" || "$sample" == "m64407e_230722_040625.bc1057--bc1057" ]]; then
+            continue
+        fi
+
+        outdir="${scratch}/igenotyper_run/${sample}"
+        mkdir -p "$outdir"
+
+        bsub -J "variant_calls" \
+            -P acc_oscarlr \
+            -q express \
+            -n 8 \
+            -W 12:00 \
+            -R "rusage[mem=50000] span[hosts=1]" \
+            -o "${outdir}/variant_calls_detect.${sample}.%J.out.txt" \
+            -e "${outdir}/variant_calls_detect.${sample}.%J.err.txt" \
+            IG detect "$outdir" 
+    done
+}
+
+
+#phase_bam_files_w_igenotyper
+#assemble_bam_files_w_igenotyper
+IG_detect_w_igenotyper_wo_2_samples
+
+
+
 
 
 ##4. Analyze IGentotyper output
+
+merge_igenotyper_vcf_files () {
+
+    module load singularity/3.11.0
+    module load bcftools
+    module load htslib
+
+    mkdir -p "${results}/deepvariants_merged_new_bam"
+    rm -rf GLnexus.DB
+
+    # 1. Get just the filenames and add the /data/ prefix to them
+    gvcfs=$(cd "${results}/deep_variant_calls" && ls *.g.vcf.gz | sed 's|^|/data/|')
+
+    # 2. Run Singularity normally
+    singularity exec \
+        -B "${results}/deep_variant_calls:/data,${data}:/bed" \
+        "/hpc/users/willij115/glnexus_v1.2.2.sif" \
+        glnexus_cli \
+        --config DeepVariantWGS \
+        --bed /bed/ig_loci.bed \
+        $gvcfs \
+    | bcftools view - | bgzip -c > "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"
+
+    bcftools index -t "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"
+
+    module purge
+}
+
+
+
+
+
 
 
 count_igenotyper_snps_per_sample_for_IG_loci () {
@@ -631,7 +734,6 @@ PY
 
 
 ##5. Histogram of read coverage across IG loci for each sample to identify SV from phased and assembled contigs from IGentotyper
-
 
 
 make_SV_bed_file () {
@@ -814,7 +916,7 @@ PY
 
 #align_bam_files_to_reference_for_deepvariant_input
 #make_bed_file
-call_variants_w_deepvariant
+#call_variants_w_deepvariant
 #merge_deepvariant_vcf_files
 
 #index_bam_files
