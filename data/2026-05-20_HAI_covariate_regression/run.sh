@@ -22,11 +22,11 @@ scratch=/sc/arion/scratch/willij115/projects/HAI/2026-05-20_HAI_covariate_regres
 get_immunespace_HAI_data_tables () {
 
 
-    wget -c -O "${scratch}/immunespaceHAI_studies_tables.csv" 'https://immunespace.org/api_kb/get_full_studies_data/?assay_curie_filter=OBI:0000875+OBI:0000872'
-    wget -c -O "${scratch}/immunespaceHAI_arms_tables.csv" 'https://immunespace.org/api_kb/get_full_arms_data/?assay_curie_filter=OBI:0000875+OBI:0000872'
-    wget -c -O "${scratch}/immunespaceHAI_participants_tables.csv" 'https://immunespace.org/api_kb/get_full_participants_data/?assay_curie_filter=OBI:0000875+OBI:0000872'
-    wget -c -O "${scratch}/immunespaceHAI_events_tables.csv" 'https://immunespace.org/api_kb/get_full_events_data/?assay_curie_filter=OBI:0000875+OBI:0000872'
-    wget -c -O "${scratch}/immunespaceHAI_assays_tables.csv" 'https://immunespace.org/api_kb/get_full_assays_data/?assay_curie_filter=OBI:0000875+OBI:0000872'
+    wget -c -O "${scratch}/immunespaceHAI_studies_tables.csv" 'https://immunespace.org/api_kb/get_full_studies_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872&ordering_studies=investigation_id&ordering_studies_dir=desc&ordering_tab=study_tab'
+    wget -c -O "${scratch}/immunespaceHAI_arms_tables.csv" 'https://immunespace.org/api_kb/get_full_arms_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872'
+    wget -c -O "${scratch}/immunespaceHAI_participants_tables.csv" 'https://immunespace.org/api_kb/get_full_participants_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872'
+    wget -c -O "${scratch}/immunespaceHAI_events_tables.csv" 'https://immunespace.org/api_kb/get_full_events_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872'
+    wget -c -O "${scratch}/immunespaceHAI_assays_tables.csv" 'https://immunespace.org/api_kb/get_full_assays_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872'
 
 }
 
