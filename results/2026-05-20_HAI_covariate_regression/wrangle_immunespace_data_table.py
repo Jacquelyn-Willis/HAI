@@ -32,6 +32,8 @@ participants = pd.read_csv(os.path.join(SCRATCH,'immunespaceHAI_participants_tab
 events = pd.read_csv(os.path.join(SCRATCH,'immunespaceHAI_events_tables.csv'), header = 0)
 assays = pd.read_csv(os.path.join(SCRATCH,'immunespaceHAI_assays_tables.csv'), header = 0)
 
+demo = pd.read_csv(os.path.join(SCRATCH,'datatools_demographic_Table.csv'), header = 0)
+hai = pd.read_csv(os.path.join(SCRATCH,'datatools_HAI_Table.csv'), header = 0)
 
 
 merged1 = pd.merge(
@@ -97,7 +99,7 @@ analysis_df['Value'] = pd.to_numeric(analysis_df['Value'])
 analysis_df['Age'] = pd.to_numeric(analysis_df['Age'])
 
 # Create a new column with log2-transformed HAI titers
-analysis_df["Value_log2"] = np.log2(analysis_df["Value"].replace(0, np.nan))
+analysis_df["log2_HAI"] = np.log2(analysis_df["Value"].replace(0, np.nan))
 
 analysis_df = analysis_df[
     analysis_df["Biological sex"].isin(["female", "male"])
@@ -112,9 +114,9 @@ analysis_df = analysis_df[
 
 
 
-analysis_df['Value_log2'].describe()
+analysis_df['log2_HAI'].describe()
 
-plt.hist(analysis_df['Value_log2'], bins=10, alpha=0.7)
+plt.hist(analysis_df['log2_HAI'], bins=10, alpha=0.7)
 plt.xlabel("Value (log2)")
 plt.ylabel("Count")
 plt.show()
@@ -123,7 +125,7 @@ plt.show()
 
 #strain vs HI
 analysis_df.boxplot(
-    column="Value_log2",
+    column="log2_HAI",
     by="Target Entity Subtype",
     rot=90,
     figsize=(12, 6)
@@ -139,7 +141,7 @@ plt.show()
 plt.figure(figsize=(6,4))
 plt.scatter(
     analysis_df["Age"],
-    analysis_df["Value_log2"],
+    analysis_df["log2_HAI"],
     alpha=0.3
 )
 plt.xlabel("Age")
@@ -148,7 +150,7 @@ plt.show()
 
 #sex vs HI
 analysis_df.boxplot(
-    column="Value_log2",
+    column="log2_HAI",
     by="Biological sex",
     figsize=(5,4)
 )
@@ -427,15 +429,349 @@ else:
 
 
 
+##### NEW DATA 
+
+merge11 = pd.merge(
+    demo,
+    hai,
+    how='outer',
+    on= ['Cohort', 'Participant ID'],
+    suffixes=('_demo', '_hai')
+       
+)
+
+merge1= merge11.copy()
+merge1["log2_HAI"] = np.log2(merge1["Value Preferred"].replace(0, np.nan))
+
+#merge1['Age Reported_demo'].isna().sum()
+#merge1['Gender_demo'].isna().sum()
+#merge1['Race_demo'].isna().sum()
+
+
+#day 0, 3, 14, 28, 180
+
+day0 =merge1[merge1['Study Time Collected'] == 0]
+day3 =merge1[merge1['Study Time Collected'] == 3]
+day14 =merge1[merge1['Study Time Collected'] == 14]
+day28 =merge1[merge1['Study Time Collected'] == 28]
+day180 =merge1[merge1['Study Time Collected'] == 180]
+
+
+
+
+#start with day 0 and day 28 
+
+
+analysis_df['log2_HAI'].describe()
+
+plt.hist(analysis_df['Value_log2'], bins=10, alpha=0.7)
+plt.xlabel("Value (log2)")
+plt.ylabel("Count")
+plt.show()
+
+
+
+#strain vs HI
+merge1.boxplot(
+    column="log2_HAI",
+    by="Virus",
+    rot=90,
+    figsize=(12, 6)
+)
+plt.title("Day 0 HAI titers by strain")
+plt.xlabel("Influenza strain")
+plt.ylabel("log2 HAI")
+plt.show()
+
+
+
+#cohort vs HI
+merge1.boxplot(
+    column="log2_HAI",
+    by="Cohort",
+    rot=90,
+    figsize=(12, 6)
+)
+plt.title("Day 0 HAI titers by cohort")
+plt.xlabel("Cohort")
+plt.ylabel("log2 HAI")
+plt.show()
+
+
+
+
+import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ---------------------------------------------------------------
+# 1. LOAD DATA -- point this at your real file
+# ---------------------------------------------------------------
+df = day0.copy()
+
+# ---------------------------------------------------------------
+# 2. COLUMN MAP -- adjust right-hand values if your headers differ
+# ---------------------------------------------------------------
+COLUMNS = {
+    "outcome": "log2_HAI",
+    "age": "Age Reported_demo",
+    "sex": "Gender_demo",
+    "cohort": "Cohort",
+    "virus": "Virus",
+    "participant_id": "Participant ID",
+}
+
+clean = df.rename(columns={
+    COLUMNS["outcome"]: "log2_HAI",
+    COLUMNS["age"]: "age",
+    COLUMNS["sex"]: "sex",
+    COLUMNS["cohort"]: "cohort",
+    COLUMNS["virus"]: "virus",
+    COLUMNS["participant_id"]: "participant_id",
+})
+
+# ---------------------------------------------------------------
+# 3. BASIC CLEANING
+# ---------------------------------------------------------------
+needed = ["log2_HAI", "age", "sex", "cohort", "virus"]
+clean = clean.dropna(subset=needed).copy()
+
+clean["sex"] = clean["sex"].astype("category")
+clean["cohort"] = clean["cohort"].astype("category")
+clean["age"] = pd.to_numeric(clean["age"], errors="coerce")
+clean = clean.dropna(subset=["age"])
+
+# ---------------------------------------------------------------
+# 4. FIT MIXED MODEL SEPARATELY PER VIRUS STRAIN
+#    log2_HAI ~ age + sex + (1 | cohort)
+# ---------------------------------------------------------------
+results = {}
+
+for virus_name, sub in clean.groupby("virus"):
+    sub = sub.copy()
+    n_cohorts = sub["cohort"].nunique()
+    n_obs = len(sub)
+
+    print("=" * 70)
+    print(f"Virus: {virus_name}   (n_obs={n_obs}, n_cohorts={n_cohorts})")
+    print("=" * 70)
+
+    if n_cohorts < 2:
+        print("  -> Skipped: need >=2 cohorts to estimate a random effect.\n")
+        continue
+    if n_obs < 10:
+        print("  -> Warning: very small sample size for this virus; results unstable.\n")
+
+    model = smf.mixedlm(
+        "log2_HAI ~ age + sex",
+        data=sub,
+        groups=sub["cohort"],
+        re_formula="1",   # random intercept only
+    )
+
+    try:
+        fit = model.fit(reml=True)
+        results[virus_name] = fit
+        print(fit.summary())
+    except Exception as e:
+        print(f"  -> Model failed to converge: {e}")
+
+    print()
+
+# ---------------------------------------------------------------
+# 5. COMPACT SUMMARY TABLE ACROSS STRAINS
+# ---------------------------------------------------------------
+rows = []
+for virus_name, fit in results.items():
+    params = fit.params
+    pvals = fit.pvalues
+    ci = fit.conf_int()
+
+    for term in params.index:
+        if term in ("Group Var",):
+            continue
+        rows.append({
+            "Virus": virus_name,
+            "Term": term,
+            "Estimate": round(params[term], 4),
+            "CI_low": round(ci.loc[term, 0], 4),
+            "CI_high": round(ci.loc[term, 1], 4),
+            "p_value": round(pvals[term], 4),
+        })
+    rows.append({
+        "Virus": virus_name,
+        "Term": "Cohort (random intercept) variance",
+        "Estimate": round(fit.cov_re.iloc[0, 0], 4),
+        "CI_low": np.nan, "CI_high": np.nan, "p_value": np.nan,
+    })
+    rows.append({
+        "Virus": virus_name,
+        "Term": "Residual variance",
+        "Estimate": round(fit.scale, 4),
+        "CI_low": np.nan, "CI_high": np.nan, "p_value": np.nan,
+    })
+
+summary_df = pd.DataFrame(rows)
+print("=" * 70)
+print("SUMMARY TABLE (all strains)")
+print("=" * 70)
+print(summary_df.to_string(index=False))
+
+#summary_df.to_csv("hai_mixedlm_summary.csv", index=False)
 
 
 
 
 
 
+"""
+Model diagnostics for the HAI mixed-effects regression
+=======================================================
+For each virus strain's fitted MixedLM model, produces three standard
+diagnostic plots, arranged in a grid (rows = virus strains):
 
+  1. Residuals vs Fitted        -> checks linearity / non-random patterns
+  2. Scale-Location             -> checks homoscedasticity (constant variance);
+                                    this is the "residuals vs variance" plot
+  3. Normal Q-Q                 -> checks normality of residuals
 
+HOW TO USE WITH YOUR REAL DATA
+-------------------------------
+This script re-fits the same models as hai_mixedlm.py, so update the same
+two things here:
+  - the file path in step 1
+  - the COLUMNS dict in step 2 (use check_columns.py first if unsure)
+"""
 
+import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import scipy.stats as stats
+import warnings
 
+warnings.filterwarnings("ignore")
 
+# ---------------------------------------------------------------
+# 1. LOAD DATA -- point this at your real file
+# ---------------------------------------------------------------
+df = day0.copy()
 
+# ---------------------------------------------------------------
+# 2. COLUMN MAP -- adjust right-hand values if your headers differ
+# ---------------------------------------------------------------
+df.columns = df.columns.str.strip()  # guard against stray whitespace in headers
+
+COLUMNS = {
+    "outcome": "log2_HAI",
+    "age": "Age Reported_demo",
+    "sex": "Gender_demo",
+    "cohort": "Cohort",
+    "virus": "Virus",
+}
+
+clean = df.rename(columns={
+    COLUMNS["outcome"]: "log2_HAI",
+    COLUMNS["age"]: "age",
+    COLUMNS["sex"]: "sex",
+    COLUMNS["cohort"]: "cohort",
+    COLUMNS["virus"]: "virus",
+})
+
+missing = [c for c in ["log2_HAI", "age", "sex", "cohort", "virus"] if c not in clean.columns]
+if missing:
+    raise KeyError(f"Rename didn't produce expected columns: {missing}. "
+                    f"Available columns are: {df.columns.tolist()}")
+
+clean = clean.dropna(subset=["log2_HAI", "age", "sex", "cohort", "virus"]).copy()
+clean["sex"] = clean["sex"].astype("category")
+clean["cohort"] = clean["cohort"].astype("category")
+clean["age"] = pd.to_numeric(clean["age"], errors="coerce")
+clean = clean.dropna(subset=["age"])
+
+# ---------------------------------------------------------------
+# 3. FIT MODEL PER VIRUS STRAIN, COLLECT FITTED VALUES + RESIDUALS
+# ---------------------------------------------------------------
+fitted_models = {}
+
+for virus_name, sub in clean.groupby("virus"):
+    sub = sub.copy()
+    if sub["cohort"].nunique() < 2:
+        print(f"Skipping {virus_name}: needs >=2 cohorts for random effect.")
+        continue
+
+    model = smf.mixedlm("log2_HAI ~ age + sex", data=sub, groups=sub["cohort"], re_formula="1")
+    try:
+        fit = model.fit(reml=True)
+    except Exception as e:
+        print(f"Skipping {virus_name}: model failed to converge ({e}).")
+        continue
+
+    fitted_models[virus_name] = {
+        "fitted": fit.fittedvalues,
+        "resid": fit.resid,
+        "fit_obj": fit,
+    }
+
+if not fitted_models:
+    raise RuntimeError("No models converged — nothing to plot.")
+
+# ---------------------------------------------------------------
+# 4. DIAGNOSTIC PLOTS: one row per virus strain, 3 columns
+# ---------------------------------------------------------------
+n_models = len(fitted_models)
+fig, axes = plt.subplots(n_models, 3, figsize=(15, 4.5 * n_models), squeeze=False)
+
+for row_idx, (virus_name, m) in enumerate(fitted_models.items()):
+    fitted_vals = m["fitted"]
+    resid = m["resid"]
+
+    # Standardized residuals (for scale-location and Q-Q)
+    resid_std = (resid - resid.mean()) / resid.std()
+    sqrt_abs_std_resid = np.sqrt(np.abs(resid_std))
+
+    # --- (a) Residuals vs Fitted ---
+    ax = axes[row_idx, 0]
+    ax.scatter(fitted_vals, resid, alpha=0.7, edgecolor="k", linewidth=0.3)
+    ax.axhline(0, color="red", linestyle="--", linewidth=1)
+    ax.set_xlabel("Fitted values")
+    ax.set_ylabel("Residuals")
+    ax.set_title(f"{virus_name}\nResiduals vs Fitted")
+
+    # --- (b) Scale-Location (sqrt|standardized residuals| vs fitted) ---
+    ax = axes[row_idx, 1]
+    ax.scatter(fitted_vals, sqrt_abs_std_resid, alpha=0.7, edgecolor="k", linewidth=0.3)
+    ax.set_xlabel("Fitted values")
+    ax.set_ylabel(r"$\sqrt{|\mathrm{Standardized\ residuals}|}$")
+    ax.set_title("Scale-Location\n(checks variance is constant)")
+
+    # --- (c) Normal Q-Q plot ---
+    ax = axes[row_idx, 2]
+    stats.probplot(resid_std, dist="norm", plot=ax)
+    ax.set_title("Normal Q-Q")
+    ax.get_lines()[0].set_markerfacecolor("steelblue")
+    ax.get_lines()[0].set_markeredgecolor("k")
+    ax.get_lines()[0].set_alpha(0.7)
+    ax.get_lines()[1].set_color("red")
+
+fig.tight_layout()
+fig.savefig("/home/claude/hai_model_diagnostics.png", dpi=150, bbox_inches="tight")
+print("Saved: /home/claude/hai_model_diagnostics.png")
+
+# ---------------------------------------------------------------
+# 5. QUICK NUMERIC CHECKS TO ACCOMPANY THE PLOTS
+# ---------------------------------------------------------------
+print("\n" + "=" * 70)
+print("NUMERIC DIAGNOSTIC SUMMARY")
+print("=" * 70)
+for virus_name, m in fitted_models.items():
+    resid = m["resid"]
+    shapiro_stat, shapiro_p = stats.shapiro(resid)
+    print(f"\n{virus_name}")
+    print(f"  Residual mean:      {resid.mean():.4f}  (should be ~0)")
+    print(f"  Residual std:       {resid.std():.4f}")
+    print(f"  Shapiro-Wilk p:     {shapiro_p:.4f}  "
+          f"({'residuals look normal' if shapiro_p > 0.05 else 'deviation from normality detected'})")

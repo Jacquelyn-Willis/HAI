@@ -28,10 +28,18 @@ get_immunespace_HAI_data_tables () {
     wget -c -O "${scratch}/immunespaceHAI_events_tables.csv" 'https://immunespace.org/api_kb/get_full_events_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872'
     wget -c -O "${scratch}/immunespaceHAI_assays_tables.csv" 'https://immunespace.org/api_kb/get_full_assays_data/?assay_curie_filter=OBI%3A0000875+OBI%3A0000872'
 
+    
 }
 
 
+export_immunespace_datatools_tables () {
+    #export the data tables to the data directory
+    cp "/Users/jwillis/Downloads/demographics_2026-06-28_13-34-03.csv" "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/datatools_demographic_Table.csv"
+    cp "/Users/jwillis/Downloads/hai_2026-06-28_13-38-11.csv" "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/datatools_HAI_Table.csv"
+   
+}
 
 ##function calls
 
-get_immunespace_HAI_data_tables
+#get_immunespace_HAI_data_tables
+export_immunespace_datatools_tables
