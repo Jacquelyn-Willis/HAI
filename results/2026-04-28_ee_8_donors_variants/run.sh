@@ -771,10 +771,10 @@ PY
 
 
 ### analysis and comparison of deepvariant vs igentotyper plots
-#summarize_merged_deepvariant_vcf_split "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"  "${scratch}/merged_deepvariant_summary_split_new_bam.tsv"
-#summarize_merged_deepvariant_vcf_split "${scratch}/igenotyper_merged_sample_vcf/merged_igenotyper.vcf.gz"  "${scratch}/merged_igenotyper_summary_split.tsv"
-#plot_merged_deepvariant_vcf_summary "${scratch}/merged_deepvariant_summary_split_new_bam.tsv" "${scratch}/deepvariant_summary_counts.png"
-#plot_merged_deepvariant_vcf_summary "${scratch}/merged_igenotyper_summary_split.tsv" "${scratch}/igenotyper_summary_counts.png"    
+summarize_merged_deepvariant_vcf_split "${results}/deepvariants_merged_new_bam/deepvariant.cohort.vcf.gz"  "${scratch}/merged_deepvariant_summary_split_new_bam.tsv"
+summarize_merged_deepvariant_vcf_split "${scratch}/igenotyper_merged_sample_vcf/merged_igenotyper.vcf.gz"  "${scratch}/merged_igenotyper_summary_split.tsv"
+plot_merged_deepvariant_vcf_summary "${scratch}/merged_deepvariant_summary_split_new_bam.tsv" "${scratch}/deepvariant_summary_counts.png"
+plot_merged_deepvariant_vcf_summary "${scratch}/merged_igenotyper_summary_split.tsv" "${scratch}/igenotyper_summary_counts.png"    
 
 
 

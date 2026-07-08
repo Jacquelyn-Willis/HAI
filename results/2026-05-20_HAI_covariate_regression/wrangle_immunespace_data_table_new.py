@@ -1,3 +1,9 @@
+
+!{sys.executable} -m pip install ipykernel --upgrade --force-reinstall
+!{sys.executable} -m pip install statsmodels
+!{sys.executable} -m pip install matplotlib
+!{sys.executable} -m pip install patsy
+
 import sys
 import pandas as pd 
 import os
@@ -8,12 +14,9 @@ from patsy.contrasts import Treatment
 import warnings
 warnings.filterwarnings("ignore")
 import scipy.stats as stats
-
-!{sys.executable} -m pip install ipykernel --upgrade --force-reinstall
-!{sys.executable} -m pip install statsmodels
-!{sys.executable} -m pip install matplotlib
-
 import statsmodels.formula.api as smf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 #directories 
 
@@ -41,88 +44,188 @@ hai = pd.read_csv(os.path.join(SCRATCH,'datatools_HAI_Table.csv'), header = 0)
 
 
 
-##### NEW DATA 
+######## need to merge: merge1 , arms, and oarticipants to get study ID and cohort decriptions 
 
-merge11 = pd.merge(
+merge1 = pd.merge(
     demo,
     hai,
-    how='outer',
+    how='inner',
     on= ['Cohort', 'Participant ID'],
     suffixes=('_demo', '_hai')
        
 )
 
-merge1= merge11.copy()
-merge1["log2_HAI"] = np.log2(merge1["Value Preferred"].replace(0, np.nan))
-
-#merge1['Age Reported_demo'].isna().sum()
-#merge1['Gender_demo'].isna().sum()
-#merge1['Race_demo'].isna().sum()
+merge1_log2= merge1.copy()
+merge1_log2["log2_HAI"] = np.log2(merge1["Value Preferred"].replace(0, np.nan))
+merge1_log2["Study_ID"] = merge1_log2["Participant ID"].str.split(".").str[1]
 
 
-#day 0, 3, 14, 28, 180
+participants["Study_ID"] = participants["Study ID"].str.split("Y").str[1]
+arms["Study_ID"] = arms["Study ID"].str.split("Y").str[1]
 
-day0 =merge1[merge1['Study Time Collected'] == 0]
-day3 =merge1[merge1['Study Time Collected'] == 3]
-day14 =merge1[merge1['Study Time Collected'] == 14]
-day28 =merge1[merge1['Study Time Collected'] == 28]
-day180 =merge1[merge1['Study Time Collected'] == 180]
+merge2 = pd.merge(
+    arms,
+    participants[['Participant ID', 'Arm ID', 'Study ID', 'Study_ID']],
+    how='right',
+    on='Study_ID',
+    suffixes=('_arms', '_par')
+)
+
+merge2["new_participant_id"] = (
+     merge2["Participant ID"].astype(str).str.split(".").str[-1]
+    + "."
+    + merge2["Study_ID"].astype(str)
+)
+
+
+
+final_merge = pd.merge(
+    merge2,
+    merge1_log2,
+    how='right',
+    left_on=['new_participant_id', 'Study_ID'], 
+    right_on=['Participant ID', 'Study_ID'],
+    suffixes=('_merge2', '_merge1')    
+)
+
+
+
+strings_to_remove = [
+    "placebo",
+    "saline",
+    "type 2 diabetes",
+    "Pneunomax23",
+    "young T2D",
+    "old T2D"
+]
+pattern = "|".join(map(str, strings_to_remove))
+
+mask = (
+    final_merge["Cohort"].str.contains(pattern, case=False, na=False) |
+    final_merge["Description_merge2"].str.contains(pattern, case=False, na=False)
+)
+
+final_merge = final_merge[~mask]
+
+'''
+study_cohort_desc = (
+
+
+    final_merge[
+        ["Study ID_par", "Cohort", "Description_merge2"]
+    ]
+    .drop_duplicates()
+    .sort_values(["Study ID_par", "Cohort"])
+)
+
+study_cohort_desc2 = (
+
+
+    final_merge2[
+        ["Study ID_par", "Cohort", "Description_merge2"]
+    ]
+    .drop_duplicates()
+    .sort_values(["Study ID_par", "Cohort"])
+)
+
+
+'''
 
 
 
 
-#analyze data by day and study
 
-import matplotlib.pyplot as plt
+
+
+
 
 
 STRAIN_COL = "Virus"
-COHORT_COL = "Cohort"   # <-- update to your actual cohort column name
+COHORT_COL = "Cohort"
+MIN_N = 5
 
-def plot_group(df, label):
+os.makedirs(os.path.join(SCRATCH, "hai_demo_plots_html"), exist_ok=True)
+
+def plot_group_plotly(df, label, outdir= os.path.join(SCRATCH, "hai_demo_plots_html")):
     print(f"\n=== {label} (n={len(df)}) ===")
-    print(df['log2_HAI'].describe())
+    print(df["log2_HAI"].describe())
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=("HAI distribution", "Age vs HAI", "HAI by sex", ""),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.10,
+    )
 
-    # log2 HAI distribution
-    axes[0,0].hist(df['log2_HAI'], bins=10, alpha=0.7)
-    axes[0,0].set_xlabel("Value (log2)")
-    axes[0,0].set_ylabel("Count")
-    axes[0,0].set_title("HAI distribution")
+    # Histogram
+    fig.add_trace(
+        go.Histogram(x=df["log2_HAI"], nbinsx=10, name="log2_HAI", opacity=0.7),
+        row=1, col=1
+    )
 
-    # age vs HI
-    axes[0,1].scatter(df["Age Reported_demo"], df["log2_HAI"], alpha=0.3)
-    axes[0,1].set_xlabel("Age")
-    axes[0,1].set_ylabel("log2 HAI")
-    axes[0,1].set_title("Age vs HAI")
+    # Scatter: age vs HAI
+    fig.add_trace(
+        go.Scatter(
+            x=df["Age Reported_demo"],
+            y=df["log2_HAI"],
+            mode="markers",
+            marker=dict(opacity=0.3),
+            name="Age vs HAI",
+        ),
+        row=1, col=2
+    )
 
-    # sex vs HI
+    # Box: sex vs HAI
     if df["Gender_demo"].nunique() > 1:
-        df.boxplot(column="log2_HAI", by="Gender_demo", ax=axes[1,0])
-        axes[1,0].set_title("HAI by sex")
-        axes[1,0].set_xlabel("gender")
-        axes[1,0].set_ylabel("log2 HAI")
+        for gender, gdf in df.groupby("Gender_demo"):
+            fig.add_trace(
+                go.Box(
+                    y=gdf["log2_HAI"],
+                    name=str(gender),
+                    boxmean=True,
+                ),
+                row=2, col=1
+            )
     else:
-        axes[1,0].axis("off")
+        # leave empty if only one sex category
+        pass
 
-    # not much left to facet by since strain & cohort are already fixed —
-    # leave this panel empty or swap in something else (e.g. titer over time)
-    axes[1,1].axis("off")
+    fig.update_xaxes(title_text="Value (log2)", row=1, col=1)
+    fig.update_yaxes(title_text="Count", row=1, col=1)
 
-    plt.suptitle(label)
-    plt.tight_layout()
-    plt.show()
+    fig.update_xaxes(title_text="Age", row=1, col=2)
+    fig.update_yaxes(title_text="log2 HAI", row=1, col=2)
 
-# --- per strain × cohort combination ---
-MIN_N = 5  # skip groups with too few samples; set to 0 to disable
+    fig.update_xaxes(title_text="gender", row=2, col=1)
+    fig.update_yaxes(title_text="log2 HAI", row=2, col=1)
 
-for (strain, cohort), sub_df in day0.groupby([STRAIN_COL, COHORT_COL]):
+    fig.update_layout(
+        title=label,
+        width=1200,
+        height=900,
+        showlegend=False,
+        template="plotly_white",
+    )
+
+    filename = label.replace(" ", "_").replace("/", "_").replace("—", "_") + ".html"
+    filepath = os.path.join(outdir, filename)
+    fig.write_html(filepath, include_plotlyjs="cdn", full_html=True)
+    return filepath
+
+
+html_files = []
+
+for (strain, cohort), sub_df in final_merge.groupby([STRAIN_COL, COHORT_COL]):
     if len(sub_df) < MIN_N:
         print(f"Skipping {strain} / {cohort} (n={len(sub_df)} < {MIN_N})")
         continue
-    plot_group(sub_df, f"{strain} — {cohort}")
 
+    path = plot_group_plotly(sub_df, f"{strain} — {cohort}")
+    html_files.append(path)
+
+print("Saved HTML files:")
+for f in html_files:
+    print(f)
 
 
 
@@ -166,7 +269,7 @@ and update the COLUMNS dict accordingly.
 # ---------------------------------------------------------------
 # 1. LOAD DATA -- swap this line for your real file
 # ---------------------------------------------------------------
-df = day0.copy()  # or day3, day14, day28, day180, or merge1 for all days
+df = final_merge.copy()  # or day3, day14, day28, day180, or merge1 for all days
 # ---------------------------------------------------------------
 # 2. COLUMN MAP -- adjust right-hand values if your headers differ
 # ---------------------------------------------------------------
