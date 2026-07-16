@@ -89,7 +89,7 @@ final_merge = pd.merge(
 )
 
 
-
+#remove non influenza and unhealthy , and unvaccinated cohorts
 strings_to_remove = [
     "placebo",
     "saline",
@@ -107,34 +107,45 @@ mask = (
 
 final_merge = final_merge[~mask]
 
-'''
-study_cohort_desc = (
 
+final_merge["Race_demo"].value_counts(dropna=False) 
 
-    final_merge[
-        ["Study ID_par", "Cohort", "Description_merge2"]
-    ]
-    .drop_duplicates()
-    .sort_values(["Study ID_par", "Cohort"])
-)
+#add subtype mapping to final_merge dataframe
+subtype_map = {
+    "A/South Dakota/06/2007": "H1N1",
+    "A/Uruguay/716/2007": "H3N2",
+    "B/Florida/4/2006": "Yamagata",
+    "A/Brisbane/59/2007": "H1N1",
+    "B/Brisbane/3/2007": "Yamagata",
+    "A/Solomon Islands/3/2006": "H1N1",
+    "A/Wisconsin/67/2005": "H3N2",
+    "B/Malaysia/2506/2004": "Victoria",
+    "A/California/7/2009": "H1N1pdm09",
+    "A/Perth/16/2009": "H3N2",
+    "B/Brisbane/60/2008": "Victoria",
+    "A/Indonesia/5/2005": "H5N1",
+    "A/Brisbane/10/2007": "H3N2",
+    "A/Victoria/361/2011": "H3N2",
+    "B/Wisconsin/01/2010": "Yamagata",
+    "B/Massachusetts/02/2012": "Yamagata",
+    "A/Puerto Rico/8/1934": "H1N1",
+    "A/Victoria/3/1975": "H3N2",
+    "B/Lee/1940": "Pre-lineage",
+    "A/Texas/50/2012": "H3N2",
+    "A/Perth/19/2009": "H3N2",
+}
 
-study_cohort_desc2 = (
+strain_fix = {
+    "B/Wisonsin/01/2010": "B/Wisconsin/01/2010",
+    "B/Massachusetts/2/2012": "B/Massachusetts/02/2012",
+}
 
+final_merge["Virus"] = final_merge["Virus"].replace(strain_fix)
+final_merge["subtype"] = final_merge["Virus"].map(subtype_map)
 
-    final_merge2[
-        ["Study ID_par", "Cohort", "Description_merge2"]
-    ]
-    .drop_duplicates()
-    .sort_values(["Study ID_par", "Cohort"])
-)
+final_merge.loc[final_merge["subtype"].isna(), "Virus"].unique()
 
-
-'''
-
-
-
-
-
+#plot duistribution of values by strain and cohort of sex, age, and HAI titer values
 
 STRAIN_COL = "Virus"
 COHORT_COL = "Cohort"
@@ -226,6 +237,9 @@ for f in html_files:
 
 
 
+
+#Regression models for HAI titer values with age and sex
+
   
     
 """
@@ -286,7 +300,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import statsmodels.formula.api as smf
 
-OUTPUT_ROOT = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression"
+OUTPUT_ROOT = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/hai_regression_results"
+mkdirs = os.makedirs(OUTPUT_ROOT, exist_ok=True)   
 
 # ---------------------------------------------------------------
 # 1. LOAD DATA -- swap this line for your real merged (all-days) file
@@ -844,6 +859,326 @@ for (strain, day_val), sub_df in clean.groupby(["virus", "day"]):
     
     
     
+ """
+per-group `plot_group(...)` loop finishes). It reuses `summary_df`,
+`choice_df`, `OUTPUT_ROOT`, `OUTPUT_DIR`, and `clean` that the script
+already built. Produces a single self-contained HTML report --
+hai_regression_report.html -- with:
+  - the regression term summary table (sortable, filterable by model type)
+  - the model choice log table
+  - R^2 plots (marginal vs conditional, cohort contribution gap)
+  - variance decomposition plots (stacked bar, ranking, scatter)
+  - every per-group descriptive panel (summary_plots.png), embedded inline
+    as base64, with that group's log2_HAI describe() stats alongside it
+"""
+
+import base64
+
+def img_to_base64(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def fmt(v, nd=4):
+    if pd.isna(v):
+        return "—"
+    return f"{v:.{nd}f}" if isinstance(v, (float, np.floating)) else str(v)
+
+def img_tag(path, alt):
+    if path and os.path.exists(path):
+        return f'<img src="data:image/png;base64,{img_to_base64(path)}" alt="{alt}">'
+    return f'<p class="missing">Plot not found: {os.path.basename(path) if path else alt}</p>'
+
+# ---------------------------------------------------------------
+# Regression term summary table rows
+# ---------------------------------------------------------------
+term_rows_html = []
+for _, r in summary_df.iterrows():
+    sig = pd.notna(r["p_value"]) and r["p_value"] < 0.05
+    row_class = "sig" if sig else ""
+    term_rows_html.append(f"""
+    <tr class="{row_class}" data-model="{r['Model']}">
+        <td>{r['Virus']}</td>
+        <td>{r['Day']}</td>
+        <td>{r['Vaccinated']}</td>
+        <td>{r['Model']}</td>
+        <td>{r['Term']}</td>
+        <td>{fmt(r['Estimate'])}</td>
+        <td>{fmt(r['CI_low'])}</td>
+        <td>{fmt(r['CI_high'])}</td>
+        <td>{fmt(r['p_value'])}</td>
+    </tr>""")
+
+# ---------------------------------------------------------------
+# Model choice log table rows
+# ---------------------------------------------------------------
+choice_rows_html = []
+for _, r in choice_df.iterrows():
+    model_class = {"LMM": "lmm", "OLS": "ols"}.get(r["Model_Used"], "skipped")
+    choice_rows_html.append(f"""
+    <tr class="{model_class}">
+        <td>{r['Virus']}</td>
+        <td>{r['Day']}</td>
+        <td>{r['Vaccinated']}</td>
+        <td>{r['N_Obs']}</td>
+        <td>{r['N_Cohorts']}</td>
+        <td>{r['Model_Used']}</td>
+        <td>{r['Reason']}</td>
+        <td>{fmt(r['Marginal_R2'])}</td>
+        <td>{fmt(r['Conditional_R2'])}</td>
+    </tr>""")
+
+# ---------------------------------------------------------------
+# Per-group descriptive panels (summary_plots.png + summary_stats.csv)
+# ---------------------------------------------------------------
+def safe_name(s):
+    s = str(s).strip()
+    s = re.sub(r'[\\/*?:"<>|]', "_", s)
+    s = re.sub(r'\s+', "_", s)
+    return s
+
+group_panels_html = []
+for (strain, day_val), sub_df in clean.groupby(["virus", "day"]):
+    vacc_status = sub_df["vaccinated"].iloc[0]
+    folder_name = f"{safe_name(strain)}__Day{int(day_val)}__{safe_name(vacc_status)}"
+    group_folder = os.path.join(OUTPUT_DIR, folder_name)
+    fig_path = os.path.join(group_folder, "summary_plots.png")
+
+    desc = sub_df["log2_HAI"].describe()
+    stats_line = " | ".join(f"{k}={v:.3f}" for k, v in desc.items())
+
+    group_panels_html.append(f"""
+    <div class="panel-card">
+        <h3>{strain} &middot; Day {int(day_val)} &middot; {vacc_status} <span class="tag">n={len(sub_df)}</span></h3>
+        <p class="stats-line">{stats_line}</p>
+        {img_tag(fig_path, f"{strain} day {day_val}")}
+    </div>""")
+
+# ---------------------------------------------------------------
+# Top-level plot paths
+# ---------------------------------------------------------------
+r2_bar_path = os.path.join(OUTPUT_ROOT, "r2_marginal_vs_conditional.png")
+r2_gap_path = os.path.join(OUTPUT_ROOT, "r2_cohort_contribution_gap.png")
+var_decomp_path = os.path.join(OUTPUT_ROOT, "01_variance_decomposition.png")
+var_rank_path = os.path.join(OUTPUT_ROOT, "02_residual_variance_ranking.png")
+var_scatter_path = os.path.join(OUTPUT_ROOT, "03_residual_vs_variability.png")
+
+# ---------------------------------------------------------------
+# Assemble final HTML
+# ---------------------------------------------------------------
+html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HAI Regression Report</title>
+<style>
+    :root {{
+        --sig: #fee090; --lmm: #4472C4; --ols: #91bfdb; --skipped: #d9d9d9;
+        --bg: #f7f8fa; --card-bg: #ffffff; --border: #dfe3e8; --text: #1f2937; --muted: #6b7280;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg); color: var(--text); margin: 0; padding: 0 0 60px 0;
+    }}
+    header {{ background: #1f2937; color: white; padding: 28px 40px; }}
+    header h1 {{ margin: 0 0 4px 0; font-size: 22px; }}
+    header p {{ margin: 0; color: #b7c0cc; font-size: 14px; }}
+    nav {{
+        position: sticky; top: 0; z-index: 10; background: white; border-bottom: 1px solid var(--border);
+        padding: 10px 40px; display: flex; gap: 20px; font-size: 14px; flex-wrap: wrap;
+    }}
+    nav a {{ color: #2563eb; text-decoration: none; font-weight: 500; }}
+    nav a:hover {{ text-decoration: underline; }}
+    section {{ padding: 30px 40px; }}
+    h2 {{ font-size: 18px; border-bottom: 2px solid var(--border); padding-bottom: 8px; }}
+    .legend {{ display: flex; gap: 18px; font-size: 13px; margin-bottom: 14px; color: var(--muted); flex-wrap: wrap; }}
+    .swatch {{ display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }}
+    table {{
+        border-collapse: collapse; width: 100%; background: var(--card-bg);
+        font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }}
+    th, td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }}
+    th {{ text-align: right; background: #f0f2f5; cursor: pointer; user-select: none; position: sticky; top: 45px; }}
+    td:first-child, th:first-child, td:nth-child(3), th:nth-child(3),
+    td:nth-child(5), th:nth-child(5), td:nth-child(7), th:nth-child(7) {{ text-align: left; }}
+    tr.sig {{ background: rgba(254,224,144,0.35); }}
+    tr.lmm {{ background: rgba(68,114,196,0.10); }}
+    tr.ols {{ background: rgba(145,191,219,0.15); }}
+    tr.skipped {{ background: rgba(217,217,217,0.3); color: var(--muted); }}
+    th:after {{ content: " \\2195"; color: #9ca3af; font-size: 11px; }}
+    .filter-bar {{ margin-bottom: 10px; font-size: 13px; }}
+    .filter-bar button {{
+        padding: 5px 12px; margin-right: 6px; border: 1px solid var(--border); border-radius: 6px;
+        background: white; cursor: pointer; font-size: 12px;
+    }}
+    .filter-bar button.active {{ background: #2563eb; color: white; border-color: #2563eb; }}
+    .panel-card {{
+        background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 16px 20px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }}
+    .panel-card h3 {{ margin: 0 0 4px 0; font-size: 15px; }}
+    .panel-card .tag {{
+        font-size: 11px; font-weight: 600; background: #eef2ff; color: #4338ca;
+        padding: 2px 8px; border-radius: 10px; margin-left: 6px;
+    }}
+    .stats-line {{ font-size: 12px; color: var(--muted); margin: 0 0 10px 0; word-break: break-word; }}
+    .panel-card img, .plot-block img {{ width: 100%; max-width: 900px; border: 1px solid var(--border); border-radius: 4px; }}
+    .plot-block {{ margin-bottom: 30px; }}
+    .plot-block h3 {{ font-size: 14px; margin-bottom: 8px; }}
+    .missing {{ color: #d73027; font-size: 12px; font-style: italic; }}
+</style>
+</head>
+<body>
+
+<header>
+    <h1>HAI Regression Report</h1>
+    <p>{clean['virus'].nunique()} strains &middot; {summary_df[['Virus','Day']].drop_duplicates().shape[0]} strain-day groups modeled &middot;
+       auto LMM (&ge;2 cohorts) / OLS (1 cohort)</p>
+</header>
+
+<nav>
+    <a href="#terms">Regression Terms</a>
+    <a href="#choice">Model Choice Log</a>
+    <a href="#r2">R&sup2; Plots</a>
+    <a href="#variance">Variance Decomposition</a>
+    <a href="#groups">Per-Group Descriptives</a>
+</nav>
+
+<section id="terms">
+    <h2>Regression Term Summary</h2>
+    <div class="legend">
+        <span><span class="swatch" style="background:var(--sig)"></span>p &lt; 0.05</span>
+    </div>
+    <div class="filter-bar">
+        Filter: <button class="active" onclick="filterModel('all', this)">All</button>
+        <button onclick="filterModel('LMM', this)">LMM only</button>
+        <button onclick="filterModel('OLS', this)">OLS only</button>
+    </div>
+    <table id="term-table">
+        <thead>
+            <tr>
+                <th>Virus</th><th>Day</th><th>Vaccinated</th><th>Model</th><th>Term</th>
+                <th>Estimate</th><th>CI low</th><th>CI high</th><th>p-value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {''.join(term_rows_html)}
+        </tbody>
+    </table>
+</section>
+
+<section id="choice">
+    <h2>Model Choice Log</h2>
+    <div class="legend">
+        <span><span class="swatch" style="background:var(--lmm)"></span>LMM (&ge;2 cohorts)</span>
+        <span><span class="swatch" style="background:var(--ols)"></span>OLS (1 cohort)</span>
+        <span><span class="swatch" style="background:var(--skipped)"></span>Skipped</span>
+    </div>
+    <table id="choice-table">
+        <thead>
+            <tr>
+                <th>Virus</th><th>Day</th><th>Vaccinated</th><th>N Obs</th><th>N Cohorts</th>
+                <th>Model Used</th><th>Reason</th><th>Marg. R&sup2;</th><th>Cond. R&sup2;</th>
+            </tr>
+        </thead>
+        <tbody>
+            {''.join(choice_rows_html)}
+        </tbody>
+    </table>
+</section>
+
+<section id="r2">
+    <h2>R&sup2; Plots</h2>
+    <div class="plot-block">
+        <h3>Marginal vs Conditional R&sup2; by Strain-Day Group</h3>
+        {img_tag(r2_bar_path, "R2 marginal vs conditional")}
+    </div>
+    <div class="plot-block">
+        <h3>Cohort (Random Effect) Contribution Gap</h3>
+        {img_tag(r2_gap_path, "R2 cohort contribution gap")}
+    </div>
+</section>
+
+<section id="variance">
+    <h2>Variance Decomposition</h2>
+    <div class="plot-block">
+        <h3>Variance Decomposition by Strain-Day Group</h3>
+        {img_tag(var_decomp_path, "variance decomposition")}
+    </div>
+    <div class="plot-block">
+        <h3>Ranked by Unexplained Variance</h3>
+        {img_tag(var_rank_path, "residual variance ranking")}
+    </div>
+    <div class="plot-block">
+        <h3>Unexplained Variance vs Raw Titer Variability</h3>
+        {img_tag(var_scatter_path, "residual vs variability scatter")}
+    </div>
+</section>
+
+<section id="groups">
+    <h2>Per-Group Descriptive Panels</h2>
+    {''.join(group_panels_html)}
+</section>
+
+<script>
+document.querySelectorAll("table").forEach(table => {{
+    table.querySelectorAll("th").forEach((th, idx) => {{
+        th.addEventListener("click", () => {{
+            const tbody = table.querySelector("tbody");
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            const asc = th.dataset.asc !== "true";
+            table.querySelectorAll("th").forEach(h => h.dataset.asc = "");
+            th.dataset.asc = asc;
+            rows.sort((a, b) => {{
+                let x = a.children[idx].innerText.trim();
+                let y = b.children[idx].innerText.trim();
+                const nx = parseFloat(x), ny = parseFloat(y);
+                if (!isNaN(nx) && !isNaN(ny)) {{ x = nx; y = ny; }}
+                if (x < y) return asc ? -1 : 1;
+                if (x > y) return asc ? 1 : -1;
+                return 0;
+            }});
+            rows.forEach(r => tbody.appendChild(r));
+        }});
+    }});
+}});
+
+function filterModel(model, btn) {{
+    document.querySelectorAll(".filter-bar button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll("#term-table tbody tr").forEach(row => {{
+        row.style.display = (model === "all" || row.dataset.model === model) ? "" : "none";
+    }});
+}}
+</script>
+
+</body>
+</html>
+"""
+
+report_path = os.path.join(OUTPUT_ROOT, "hai_regression_report.html")
+with open(report_path, "w", encoding="utf-8") as f:
+    f.write(html)
+
+print(f"Saved: {report_path}")
+print("Open this single file in a browser -- all images are embedded, no other files needed.")   
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     
     
 
@@ -1031,6 +1366,7 @@ print("=" * 70)
 print(perf_df.to_string(index=False))
 print(f"\nSaved: {os.path.join(OUTPUT_ROOT, 'model_performance_summary.csv')}")
 
+
 # ---------------------------------------------------------------
 # Overview plot: RMSE per strain-day group, colored by whether residuals
 # passed the Shapiro-Wilk normality check
@@ -1041,6 +1377,8 @@ def short_label(virus, day, maxlen=30):
 
 perf_df["Group_short"] = perf_df.apply(lambda r: short_label(r["Virus"], r["Day"]), axis=1)
 perf_sorted = perf_df.sort_values("RMSE")
+
+
 
 colors = ["#91bfdb" if v else "#d73027" for v in perf_sorted["Residuals_Normal_at_0.05"].fillna(False)]
 
@@ -1060,3 +1398,226 @@ plt.close(fig)
 
 print("\nDone. Per-group 2x2 diagnostic panels saved under:")
 print(f"  {DIAG_DIR}/<strain>__Day<day>__<vaccinated>/diagnostics.png")
+
+
+
+
+
+
+"""
+RMSE overview plot are built). It produces a single self-contained HTML
+report -- model_diagnostics_report.html -- with:
+  - the summary table (sortable via click, color-coded by Shapiro-Wilk pass/fail)
+  - the RMSE overview bar chart
+  - every 2x2 diagnostic panel, embedded inline as base64 (no external image
+    files needed to view it -- you can email/share the single .html file)
+"""
+
+import base64
+
+def img_to_base64(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def fmt(v, nd=4):
+    if pd.isna(v):
+        return "—"
+    return f"{v:.{nd}f}" if isinstance(v, float) else str(v)
+
+# ---------------------------------------------------------------
+# Build summary table rows
+# ---------------------------------------------------------------
+table_rows_html = []
+for _, r in perf_df.iterrows():
+    passed = r["Residuals_Normal_at_0.05"]
+    if pd.isna(passed):
+        row_class = "unknown"
+    elif passed:
+        row_class = "pass"
+    else:
+        row_class = "fail"
+
+    table_rows_html.append(f"""
+    <tr class="{row_class}">
+        <td>{r['Virus']}</td>
+        <td>{r['Day']}</td>
+        <td>{r['Vaccinated']}</td>
+        <td>{r['Model']}</td>
+        <td>{r['N_Obs']}</td>
+        <td>{fmt(r['AIC'], 2)}</td>
+        <td>{fmt(r['BIC'], 2)}</td>
+        <td>{fmt(r['RMSE'])}</td>
+        <td>{fmt(r['MAE'])}</td>
+        <td>{fmt(r['Marginal_R2'])}</td>
+        <td>{fmt(r['Conditional_R2'])}</td>
+        <td>{fmt(r['Shapiro_W'])}</td>
+        <td>{fmt(r['Shapiro_p'])}</td>
+        <td>{'Yes' if passed is True else ('No' if passed is False else '—')}</td>
+    </tr>""")
+
+# ---------------------------------------------------------------
+# Build per-group diagnostic panel sections, embedded as base64
+# ---------------------------------------------------------------
+panel_sections_html = []
+for _, r in perf_df.sort_values(["Virus", "Day"]).iterrows():
+    b64 = img_to_base64(r["Diagnostic_Plot"])
+    panel_sections_html.append(f"""
+    <div class="panel-card">
+        <h3>{r['Virus']} &middot; Day {r['Day']} &middot; {r['Vaccinated']} <span class="tag">{r['Model']}</span></h3>
+        <p class="stats-line">
+            RMSE={fmt(r['RMSE'])} | MAE={fmt(r['MAE'])} | AIC={fmt(r['AIC'],2)} | BIC={fmt(r['BIC'],2)} |
+            Shapiro p={fmt(r['Shapiro_p'])} ({'normal' if r['Residuals_Normal_at_0.05'] is True else 'non-normal' if r['Residuals_Normal_at_0.05'] is False else 'n/a'})
+        </p>
+        <img src="data:image/png;base64,{b64}" alt="diagnostics for {r['Virus']} day {r['Day']}">
+    </div>""")
+
+rmse_overview_path = os.path.join(OUTPUT_ROOT, "05_rmse_by_group.png")
+rmse_b64 = img_to_base64(rmse_overview_path) if os.path.exists(rmse_overview_path) else None
+
+# ---------------------------------------------------------------
+# Assemble final HTML
+# ---------------------------------------------------------------
+html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HAI Model Diagnostics Report</title>
+<style>
+    :root {{
+        --pass: #91bfdb;
+        --fail: #d73027;
+        --bg: #f7f8fa;
+        --card-bg: #ffffff;
+        --border: #dfe3e8;
+        --text: #1f2937;
+        --muted: #6b7280;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        padding: 0 0 60px 0;
+    }}
+    header {{
+        background: #1f2937;
+        color: white;
+        padding: 28px 40px;
+    }}
+    header h1 {{ margin: 0 0 4px 0; font-size: 22px; }}
+    header p {{ margin: 0; color: #b7c0cc; font-size: 14px; }}
+    nav {{
+        position: sticky; top: 0; z-index: 10;
+        background: white; border-bottom: 1px solid var(--border);
+        padding: 10px 40px; display: flex; gap: 20px; font-size: 14px;
+    }}
+    nav a {{ color: #2563eb; text-decoration: none; font-weight: 500; }}
+    nav a:hover {{ text-decoration: underline; }}
+    section {{ padding: 30px 40px; }}
+    h2 {{ font-size: 18px; border-bottom: 2px solid var(--border); padding-bottom: 8px; }}
+    .legend {{ display: flex; gap: 18px; font-size: 13px; margin-bottom: 14px; color: var(--muted); }}
+    .swatch {{ display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }}
+    table {{
+        border-collapse: collapse; width: 100%; background: var(--card-bg);
+        font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }}
+    th, td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }}
+    th {{ text-align: right; background: #f0f2f5; cursor: pointer; user-select: none; position: sticky; top: 45px; }}
+    td:first-child, th:first-child {{ text-align: left; }}
+    td:nth-child(3), th:nth-child(3) {{ text-align: left; }}
+    td:nth-child(4), th:nth-child(4) {{ text-align: left; }}
+    tr.pass {{ background: rgba(145,191,219,0.15); }}
+    tr.fail {{ background: rgba(215,48,39,0.10); }}
+    th:after {{ content: " \\2195"; color: #9ca3af; font-size: 11px; }}
+    .panel-card {{
+        background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 16px 20px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }}
+    .panel-card h3 {{ margin: 0 0 4px 0; font-size: 15px; }}
+    .panel-card .tag {{
+        font-size: 11px; font-weight: 600; background: #eef2ff; color: #4338ca;
+        padding: 2px 8px; border-radius: 10px; margin-left: 6px;
+    }}
+    .stats-line {{ font-size: 12px; color: var(--muted); margin: 0 0 10px 0; }}
+    .panel-card img {{ width: 100%; max-width: 900px; border: 1px solid var(--border); border-radius: 4px; }}
+    #overview img {{ max-width: 900px; width: 100%; border: 1px solid var(--border); border-radius: 4px; }}
+</style>
+</head>
+<body>
+
+<header>
+    <h1>HAI Model Diagnostics Report</h1>
+    <p>{len(perf_df)} strain-day models &middot; generated from per-strain-per-day LMM/OLS fits</p>
+</header>
+
+<nav>
+    <a href="#summary">Summary Table</a>
+    <a href="#overview">RMSE Overview</a>
+    <a href="#panels">Diagnostic Panels</a>
+</nav>
+
+<section id="summary">
+    <h2>Model Performance Summary</h2>
+    <div class="legend">
+        <span><span class="swatch" style="background:var(--pass)"></span>Residuals normal (Shapiro p &gt; 0.05)</span>
+        <span><span class="swatch" style="background:var(--fail)"></span>Residuals non-normal (p &le; 0.05)</span>
+    </div>
+    <table id="perf-table">
+        <thead>
+            <tr>
+                <th>Virus</th><th>Day</th><th>Vaccinated</th><th>Model</th><th>N</th>
+                <th>AIC</th><th>BIC</th><th>RMSE</th><th>MAE</th>
+                <th>Marg. R²</th><th>Cond. R²</th><th>Shapiro W</th><th>Shapiro p</th><th>Normal?</th>
+            </tr>
+        </thead>
+        <tbody>
+            {''.join(table_rows_html)}
+        </tbody>
+    </table>
+</section>
+
+<section id="overview">
+    <h2>RMSE by Strain-Day Group</h2>
+    {f'<img src="data:image/png;base64,{rmse_b64}" alt="RMSE overview">' if rmse_b64 else '<p>Overview plot not found.</p>'}
+</section>
+
+<section id="panels">
+    <h2>Per-Group Diagnostic Panels</h2>
+    {''.join(panel_sections_html)}
+</section>
+
+<script>
+// Simple click-to-sort on the summary table
+document.querySelectorAll("#perf-table th").forEach((th, idx) => {{
+    th.addEventListener("click", () => {{
+        const table = th.closest("table");
+        const tbody = table.querySelector("tbody");
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        const asc = th.dataset.asc !== "true";
+        table.querySelectorAll("th").forEach(h => h.dataset.asc = "");
+        th.dataset.asc = asc;
+        rows.sort((a, b) => {{
+            let x = a.children[idx].innerText.trim();
+            let y = b.children[idx].innerText.trim();
+            const nx = parseFloat(x), ny = parseFloat(y);
+            if (!isNaN(nx) && !isNaN(ny)) {{ x = nx; y = ny; }}
+            if (x < y) return asc ? -1 : 1;
+            if (x > y) return asc ? 1 : -1;
+            return 0;
+        }});
+        rows.forEach(r => tbody.appendChild(r));
+    }});
+}});
+</script>
+
+</body>
+</html>
+"""
+
+report_path = os.path.join(OUTPUT_ROOT, "model_diagnostics_report.html")
+with open(report_path, "w", encoding="utf-8") as f:
+    f.write(html)
+
+print(f"Saved: {report_path}")
+print("Open this single file in a browser -- all images are embedded, no other files needed.")
