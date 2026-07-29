@@ -87,8 +87,8 @@ final_merge = pd.merge(
     merge2,
     merge1_log2,
     how='right',
-    left_on=['new_participant_id', 'Study_ID'], 
-    right_on=['Participant ID', 'Study_ID'],
+    left_on=['new_participant_id', 'Study_ID', "Name"], 
+    right_on=['Participant ID', 'Study_ID', "Cohort"],
     suffixes=('_merge2', '_merge1')    
 )
 
@@ -124,7 +124,7 @@ subtype_map = {
     "A/Solomon Islands/3/2006": "H1N1",
     "A/Wisconsin/67/2005": "H3N2",
     "B/Malaysia/2506/2004": "Victoria",
-    "A/California/7/2009": "H1N1pdm09",
+    "A/California/7/2009": "H1N1",
     "A/Perth/16/2009": "H3N2",
     "B/Brisbane/60/2008": "Victoria",
     "A/Indonesia/5/2005": "H5N1",
@@ -134,10 +134,12 @@ subtype_map = {
     "B/Massachusetts/02/2012": "Yamagata",
     "A/Puerto Rico/8/1934": "H1N1",
     "A/Victoria/3/1975": "H3N2",
-    "B/Lee/1940": "Pre-lineage",
+    "B/Lee/1940": "B Pre-lineage",
     "A/Texas/50/2012": "H3N2",
     "A/Perth/19/2009": "H3N2",
 }
+
+
 
 strain_fix = {
     "B/Wisonsin/01/2010": "B/Wisconsin/01/2010",
@@ -151,13 +153,18 @@ final_merge.loc[final_merge["subtype"].isna(), "Virus"].unique()
 
 
 
+#check that all participant IDs in final_merge are present in the hai table after filtering
+set(final_merge['Participant ID_merge1']).issubset(set(hai['Participant ID']))
+
+
+final_merge["Cohort for regression"] = final_merge["Description_merge2"].fillna(final_merge["Cohort"])
 
 ### pre HAI demographics and distribution plots
 
 
 # ---- config ----
 STRAIN_COL = "Virus"
-COHORT_COL = "Cohort"
+COHORT_COL = "Cohort for regression"
 DAY_COL = "Study Time Collected"
 DAY_UNIT_COL = "Study Time Collected Unit"
 SUBTYPE_COL = "subtype"
@@ -393,7 +400,7 @@ COLUMNS = {
     "outcome": "log2_HAI",
     "age": "Age Reported_demo",
     "sex": "Gender_demo",
-    "cohort": "Cohort",
+    "cohort": "Cohort for regression",
     "virus": "Virus",
     "subtype": "subtype",
     "study_id": "Study_ID",
@@ -405,7 +412,7 @@ clean = df.rename(columns={
     COLUMNS["outcome"]: "log2_HAI",
     COLUMNS["age"]: "age",
     COLUMNS["sex"]: "sex",
-    COLUMNS["cohort"]: "cohort",
+    COLUMNS["cohort"]: "Cohort for regression",
     COLUMNS["virus"]: "virus",
     COLUMNS["subtype"]: "subtype",
     COLUMNS["study_id"]: "study_id",
@@ -413,7 +420,7 @@ clean = df.rename(columns={
     COLUMNS["day"]: "day",
 })
 
-needed = ["log2_HAI", "age", "sex", "cohort", "virus", "subtype", "study_id", "day"]
+needed = ["log2_HAI", "age", "sex", "Cohort for regression", "virus", "subtype", "study_id", "day"]
 missing = [c for c in needed if c not in clean.columns]
 if missing:
     raise KeyError(f"Rename didn't produce expected columns: {missing}. "
@@ -421,7 +428,7 @@ if missing:
 
 clean = clean.dropna(subset=needed).copy()
 clean["sex"] = clean["sex"].astype("category")
-clean["cohort"] = clean["cohort"].astype("category")
+clean["cohort"] = clean["Cohort for regression"].astype("category")
 clean["subtype"] = clean["subtype"].astype("category")
 clean["age"] = pd.to_numeric(clean["age"], errors="coerce")
 clean["day"] = pd.to_numeric(clean["day"], errors="coerce")
@@ -465,7 +472,7 @@ strain_counts = (
     .agg(
         N_Samples=("log2_HAI", "count"),
         N_Studies=("study_id", "nunique"),
-        N_Cohorts=("cohort", "nunique"),
+        N_Cohorts=("Cohort for regression", "nunique"),
         N_Days=("day", "nunique"),
     )
     .reset_index()
@@ -961,7 +968,7 @@ def plot_std_vs_residual(sub_vdf, title, out_path):
         )
 
     ax.set_xlabel("HAI Titer Std Dev (log2 scale)", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Residual Variance (unexplained, after age/sex/cohort)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Residual Variance (unexplained, after age/sex/cohort adjustment)", fontsize=11, fontweight="bold")
     ax.set_title(title, fontsize=13, fontweight="bold")
     ax.grid(True, alpha=0.3)
 
@@ -1143,10 +1150,10 @@ for subtype in sorted(vdf["Subtype"].dropna().unique()):
             fontsize=7.5,
         )
 
-    ax.set_xlabel("HAI Titer Variability (Std of log2 titers)", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Unexplained / individual-level variance (%)", fontsize=11, fontweight="bold")
+    ax.set_xlabel("HAI Titer Std Dev (log2 scale)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Unexplained variance (%)", fontsize=11, fontweight="bold")
     ax.set_title(
-        f"Unexplained Variance vs. Raw HAI Titer Variability\nSubtype: {subtype}",
+        f"Raw HAI Titer Variability vs. Residual Variance (%) After Covariate Adjustment\nSubtype: {subtype}",
         fontsize=12,
         fontweight="bold",
     )
@@ -1207,7 +1214,7 @@ for subtype in sorted(vdf["Subtype"].dropna().unique()):
 
     outfile = os.path.join(
         OUTPUT_ROOT,
-        f"03_residual_vs_variability_{safe_name(subtype)}.png"
+        f"03_residual(relative)_vs_std_dev_{safe_name(subtype)}.png"
     )
     fig.savefig(outfile, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -1756,3 +1763,1091 @@ with open(html_file_path, "w", encoding="utf-8") as f:
     f.write(html_content)
 
 print(f"✅ HTML Report successfully built and saved to:\n   {html_file_path}")
+
+
+
+
+
+####plots needed for lab notebook
+
+### pre HAI demographics and distribution plots
+### One PNG per strain: 3 facets (distribution / age vs HAI / HAI by sex),
+### with Day plotted as different colors (shared legend) within each facet.
+### PNGs are organized into subfolders by subtype for easy cross-strain comparison.
+
+import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+import pandas as pd
+
+# ---- config ----
+STRAIN_COL = "Virus"
+COHORT_COL = "Cohort"
+DAY_COL = "Study Time Collected"
+DAY_UNIT_COL = "Study Time Collected Unit"
+SUBTYPE_COL = "subtype"
+AGE_COL = "Age Reported_demo"
+GENDER_COL = "Gender_demo"
+HAI_COL = "log2_HAI"
+MIN_N = 10  # per strain/day slice; days below this are dropped before plotting
+
+
+outdir = os.path.join(SCRATCH, "final_hai_strain_facet_png")
+os.makedirs(outdir, exist_ok=True)
+
+sns.set_style("whitegrid")
+
+
+def slugify(s):
+    return (
+        str(s)
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("—", "_")
+        .replace(":", "")
+    )
+
+
+def make_strain_facet_png(strain_df, strain, subtype, day_col, out_path):
+    """Build a 1x4 facet PNG for one strain: distribution, age vs HAI, HAI by sex, HAI by phenotype.
+    Days are colored consistently across all four panels with one shared legend.
+    """
+    days = sorted(strain_df[day_col].dropna().unique())
+    palette = dict(zip(days, sns.color_palette("tab10", n_colors=len(days))))
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+
+    # --- Panel 1: HAI distribution, colored by day ---
+    # Outlined step histograms (no fill) so overlapping day-colors stay
+    # readable as distinct lines instead of blending into a solid mass.
+    sns.histplot(
+        data=strain_df,
+        x=HAI_COL,
+        hue=day_col,
+        palette=palette,
+        multiple="layer",
+        fill=False,
+        element="step",
+        linewidth=2.2,
+        bins=10,
+        ax=axes[0],
+        legend=False,
+    )
+    axes[0].set_title("HAI distribution")
+    axes[0].set_xlabel("log2 HAI")
+    axes[0].set_ylabel("Count")
+
+    # --- Panel 2: Age vs HAI, colored by day ---
+    sns.scatterplot(
+        data=strain_df,
+        x=AGE_COL,
+        y=HAI_COL,
+        hue=day_col,
+        palette=palette,
+        alpha=0.5,
+        ax=axes[1],
+        legend=False,
+    )
+    axes[1].set_title("Age vs HAI")
+    axes[1].set_xlabel("Age")
+    axes[1].set_ylabel("log2 HAI")
+
+    # --- Panel 3: HAI by sex, colored by day (grouped boxplot) ---
+    sns.boxplot(
+        data=strain_df,
+        x=GENDER_COL,
+        y=HAI_COL,
+        hue=day_col,
+        palette=palette,
+        ax=axes[2],
+    )
+    axes[2].set_title("HAI by sex")
+    axes[2].set_xlabel("Gender")
+    axes[2].set_ylabel("log2 HAI")
+    axes[2].legend_.remove()  # remove per-axis legend, add one shared legend below
+    
+
+
+    # --- shared legend for Day, placed once for the whole figure ---
+    handles = [mpatches.Patch(color=palette[d], label=f"Day {d}") for d in days]
+    fig.legend(
+        handles=handles,
+        title=day_col,
+        loc="lower center",
+        ncol=min(len(days), 8),
+        bbox_to_anchor=(0.5, -0.05),
+        frameon=False,
+    )
+
+    n_total = len(strain_df)
+    fig.suptitle(f"{strain}  (Subtype: {subtype}, N={n_total})", fontsize=14, y=1.03)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---- build one PNG per strain, grouped into subtype subfolders ----
+final_merge["_subtype_filled"] = (
+    final_merge[SUBTYPE_COL].fillna("NA") if SUBTYPE_COL in final_merge.columns else "NA"
+)
+
+subtypes = sorted(final_merge["_subtype_filled"].dropna().unique())
+saved_files = []
+
+for subtype in subtypes:
+    subtype_df = final_merge[final_merge["_subtype_filled"] == subtype]
+    subtype_dir = os.path.join(outdir, f"subtype_{slugify(subtype)}")
+    os.makedirs(subtype_dir, exist_ok=True)
+
+    strains = sorted(subtype_df[STRAIN_COL].dropna().unique())
+
+    for strain in strains:
+        strain_df_full = subtype_df[subtype_df[STRAIN_COL] == strain].copy()
+
+        # drop days with too few samples, same as before, but keep the rest together
+        day_counts = strain_df_full[DAY_COL].value_counts()
+        valid_days = day_counts[day_counts >= MIN_N].index
+        strain_df = strain_df_full[strain_df_full[DAY_COL].isin(valid_days)]
+
+        if strain_df.empty:
+            print(f"Skipping {strain} (subtype {subtype}): no day group with N >= {MIN_N}")
+            continue
+
+        dropped = set(strain_df_full[DAY_COL].dropna().unique()) - set(valid_days)
+        if dropped:
+            print(f"{strain}: dropping days {sorted(dropped)} (N < {MIN_N})")
+
+        fname = f"{slugify(strain)}.png"
+        out_path = os.path.join(subtype_dir, fname)
+
+        make_strain_facet_png(strain_df, strain, subtype, DAY_COL, out_path)
+        saved_files.append(out_path)
+        print(f"Saved: {out_path}")
+
+print(f"\nDone. {len(saved_files)} PNGs saved under {outdir}")
+
+
+
+#table of  phenotype value counts
+
+final_merge["Phenotype"].value_counts()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##post confirmation regression analysis 
+
+#1 filter final_merge for final strain list and only d0 and d28 for a single cohort 
+strain_list = ['A/Solomon Islands/3/2006', 'A/California/7/2009', 'A/Perth/16/2009',
+               'A/Victoria/361/2011', 'B/Malaysia/2506/2004', 'B/Brisbane/3/2007', 'B/Wisconsin/01/2010']
+
+post_df = final_merge[(final_merge['Virus'].isin(strain_list)) & 
+                      (final_merge['Study Time Collected'].isin([0, 28]))]
+
+
+#h1n1
+h1n1 = post_df[post_df['Virus'].isin(['A/California/7/2009', 'A/Solomon Islands/3/2006'])]
+solomon = h1n1[h1n1['Cohort for regression'] == 'Older participants aged 60 to 89 years, vaccinated with Fluzone']
+cali = h1n1[h1n1['Cohort for regression'] == '150 healthy adults, 50-74 yo']
+
+
+#h3n2
+h3n2 = post_df[(post_df['Virus'].isin(['A/Perth/16/2009', 'A/Victoria/361/2011']))]
+perth = h3n2[(h3n2['Virus'] == 'A/Perth/16/2009') & (h3n2['Cohort for regression'] == '150 healthy adults, 50-74 yo')]
+vic= h3n2[(h3n2['Virus'] == 'A/Victoria/361/2011') & (h3n2['Cohort for regression'] == 'Healthy Adults 2012 - 2013 ')]
+
+
+#victoria
+victoria = post_df[post_df['Virus'] == "B/Malaysia/2506/2004"] 
+malaysia = victoria[victoria['Cohort'] == 'Older participants aged 60 to 89 years, vaccinated with Fluzone']
+ 
+
+
+#yamagata
+yamagata = post_df[post_df['Virus'].isin(['B/Brisbane/3/2007', 'B/Wisconsin/01/2010'])]
+brisbane = yamagata[(yamagata['Virus'] == 'B/Brisbane/3/2007')] #single cohort for regression already #add data from publication for confirmation
+wisconsin = yamagata[(yamagata['Virus'] == 'B/Wisconsin/01/2010') & (yamagata['Cohort for regression'] == 'Healthy Adults 2012 - 2013')]
+
+
+ 
+
+
+
+
+
+# Put all 6 DataFrames in a list
+replication_df_list = [solomon, cali, perth, vic, malaysia, brisbane, wisconsin]
+
+# Stacking them into 1 single DataFrame
+rep_df = pd.concat(replication_df_list, ignore_index=True)
+
+
+
+
+
+
+"""
+HAI regression + variance analysis, organized by Subtype -> Strain -> Day
+===========================================================================
+Builds on the original per-strain-per-day LMM/OLS logic, but:
+
+  1. Everything is grouped/output by SUBTYPE -> STRAIN -> DAY, not just
+     strain-day, so results for the same subtype sit together.
+  2. Every strain gets an annotation block: total N samples, N distinct
+     studies, N distinct cohorts (computed once, across ALL days/visits
+     for that strain).
+  3. New "Std Dev vs Residual Variance" bubble plot, with the N for each
+     group written directly next to its bubble (not just encoded in size).
+  4. All descriptive + model-fit + variance plots for a subtype/strain/day
+     are collected into ONE self-contained HTML report you can open from
+     a single link, with a jump-to table of contents.
+
+Run this after `final_merge` is already in memory (same as your original
+script).
+"""
+
+
+
+
+OUTPUT_ROOT = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/replication_hai_regression_results"
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+# ---------------------------------------------------------------
+# 1. LOAD + CLEAN (same as original)
+# ---------------------------------------------------------------
+df = rep_df.copy()
+df.columns = df.columns.str.strip()
+
+COLUMNS = {
+    "outcome": "log2_HAI",
+    "age": "Age Reported_demo",
+    "sex": "Gender_demo",
+    "cohort": "Cohort for regression",
+    "virus": "Virus",
+    "subtype": "subtype",
+    "study_id": "Study_ID",
+    "participant_id": "Participant ID",
+    "day": "Study Time Collected",
+}
+
+clean = df.rename(columns={
+    COLUMNS["outcome"]: "log2_HAI",
+    COLUMNS["age"]: "age",
+    COLUMNS["sex"]: "sex",
+    COLUMNS["cohort"]: "Cohort for regression",
+    COLUMNS["virus"]: "virus",
+    COLUMNS["subtype"]: "subtype",
+    COLUMNS["study_id"]: "study_id",
+    COLUMNS["participant_id"]: "participant_id",
+    COLUMNS["day"]: "day",
+})
+
+needed = ["log2_HAI", "age", "sex", "Cohort for regression", "virus", "subtype", "study_id", "day"]
+missing = [c for c in needed if c not in clean.columns]
+if missing:
+    raise KeyError(f"Rename didn't produce expected columns: {missing}. "
+                    f"Available columns are: {df.columns.tolist()}")
+
+clean = clean.dropna(subset=needed).copy()
+clean["sex"] = clean["sex"].astype("category")
+clean["cohort"] = clean["Cohort for regression"].astype("category")
+clean["subtype"] = clean["subtype"].astype("category")
+clean["age"] = pd.to_numeric(clean["age"], errors="coerce")
+clean["day"] = pd.to_numeric(clean["day"], errors="coerce")
+clean = clean.dropna(subset=["age", "day"])
+
+if "Study Time Collected Unit" in df.columns:
+    bad_units = df.loc[clean.index, "Study Time Collected Unit"].dropna().unique()
+    bad_units = [u for u in bad_units if str(u).strip().lower() != "days"]
+    if bad_units:
+        raise ValueError(
+            f"'Study Time Collected' isn't uniformly in Days -- found units: {bad_units}."
+        )
+
+clean["vaccinated"] = np.where(clean["day"] >= 14, "Vaccinated", "Not Vaccinated")
+clean["vaccinated"] = clean["vaccinated"].astype("category")
+
+
+def mixedlm_r2(fit):
+    fixed_effects_fitted = fit.model.exog @ fit.fe_params
+    var_fixed = np.var(fixed_effects_fitted, ddof=0)
+    var_random = fit.cov_re.iloc[0, 0]
+    var_resid = fit.scale
+    total = var_fixed + var_random + var_resid
+    return var_fixed / total, (var_fixed + var_random) / total
+
+
+def safe_name(s):
+    s = str(s).strip()
+    s = re.sub(r'[\\/*?:"<>|]', "_", s)
+    s = re.sub(r'\s+', "_", s)
+    return s
+
+
+# ---------------------------------------------------------------
+# 2. STRAIN-LEVEL ANNOTATION COUNTS
+#    (computed ACROSS ALL DAYS for that strain -- this is the
+#    "how many samples / studies / cohorts" annotation)
+# ---------------------------------------------------------------
+strain_counts = (
+    clean.groupby(["subtype", "virus"])
+    .agg(
+        N_Samples=("log2_HAI", "count"),
+        N_Studies=("study_id", "nunique"),
+        N_Cohorts=("Cohort for regression", "nunique"),
+        N_Days=("day", "nunique"),
+    )
+    .reset_index()
+)
+strain_counts.to_csv(os.path.join(OUTPUT_ROOT, "replication_strain_level_counts.csv"), index=False)
+print("Strain-level counts (samples / studies / cohorts):")
+print(strain_counts.to_string(index=False))
+
+
+def strain_annotation_text(virus_name):
+    row = strain_counts[strain_counts["virus"] == virus_name]
+    if row.empty:
+        return "N_Samples=?, N_Studies=?, N_Cohorts=?"
+    r = row.iloc[0]
+    return f"N_Samples={r['N_Samples']} | N_Studies={r['N_Studies']} | N_Cohorts={r['N_Cohorts']} | N_Days={r['N_Days']}"
+
+# ---------------------------------------------------------------
+# 3. PER (subtype, virus, day) MODEL FIT -- OLS only
+# ---------------------------------------------------------------
+ols_results, r2_values, vacc_label = {}, {}, {}
+
+for (subtype_name, virus_name, day_val), sub in clean.groupby(["subtype", "virus", "day"]):
+    sub = sub.copy()
+    n_obs = len(sub)
+    vacc_status = sub["vaccinated"].iloc[0]   # label only, not modeled
+    key = (subtype_name, virus_name, day_val)
+    vacc_label[key] = vacc_status
+
+    if n_obs < 20:
+        continue
+
+    try:
+        ols_fit = smf.ols("log2_HAI ~ age + sex", data=sub).fit()
+        ols_results[key] = ols_fit
+        r2_values[key] = ols_fit.rsquared
+    except Exception as e:
+        print(f"  -> OLS failed for {key}: {e}")
+
+# ---------------------------------------------------------------
+# 4. UNIFIED SUMMARY TABLE (OLS only)
+# ---------------------------------------------------------------
+rows = []
+for (subtype_name, virus_name, day_val), fit in ols_results.items():
+    params, pvals, ci = fit.params, fit.pvalues, fit.conf_int()
+
+    for term in params.index:
+        rows.append({
+            "Subtype": subtype_name,
+            "Virus": virus_name,
+            "Day": day_val,
+            "Vaccinated": vacc_label[(subtype_name, virus_name, day_val)],
+            "Model": "OLS",
+            "Term": term,
+            "Estimate": round(params[term], 4),
+            "CI_low": round(ci.loc[term, 0], 4),
+            "CI_high": round(ci.loc[term, 1], 4),
+            "p_value": round(pvals[term], 4),
+        })
+
+    rows.append({
+        "Subtype": subtype_name,
+        "Virus": virus_name,
+        "Day": day_val,
+        "Vaccinated": vacc_label[(subtype_name, virus_name, day_val)],
+        "Model": "OLS",
+        "Term": "Residual variance",
+        "Estimate": round(fit.mse_resid, 4),
+        "CI_low": np.nan,
+        "CI_high": np.nan,
+        "p_value": np.nan,
+    })
+
+summary_df = pd.DataFrame(rows)
+summary_df.to_csv(os.path.join(OUTPUT_ROOT, "replication_hai_regression_summary.csv"), index=False)
+
+# ---------------------------------------------------------------
+# 5. MODEL CHOICE LOG
+# ---------------------------------------------------------------
+choice_rows = []
+for (subtype_name, virus_name, day_val), sub in clean.groupby(["subtype", "virus", "day"]):
+    n_obs = len(sub)
+    key = (subtype_name, virus_name, day_val)
+    r2 = r2_values.get(key, np.nan)
+
+    choice_rows.append({
+        "Subtype": subtype_name,
+        "Virus": virus_name,
+        "Day": day_val,
+        "Vaccinated": vacc_label.get(key, sub["vaccinated"].iloc[0]),
+        "N_Obs": n_obs,
+        "N_Cohorts": 1,
+        "Model_Used": "OLS" if key in ols_results else "Skipped (n_obs<20)",
+        "R2": round(r2, 4) if pd.notna(r2) else np.nan,
+        "Residual_Unexplained_pct": round(100 * (1 - r2), 4) if pd.notna(r2) else np.nan,
+    })
+
+choice_df = pd.DataFrame(choice_rows)
+choice_df.to_csv(os.path.join(OUTPUT_ROOT, "replication_hai_model_choice_log.csv"), index=False)
+
+# ---------------------------------------------------------------
+# 6. VARIANCE / EXPLAINED-VARIANCE TABLE (OLS only)
+# ---------------------------------------------------------------
+resid_rows = summary_df[summary_df["Term"] == "Residual variance"].copy()
+resid_rows = resid_rows.rename(columns={"Estimate": "Residual_Variance"})
+
+vdf = choice_df.merge(
+    resid_rows[["Subtype", "Virus", "Day", "Residual_Variance"]],
+    on=["Subtype", "Virus", "Day"],
+    how="left",
+)
+
+stats_by_group = (
+    clean.groupby(["subtype", "virus", "day"])["log2_HAI"]
+    .agg(Std_HAI_log2="std", N_Participants="count")
+    .reset_index()
+    .rename(columns={"subtype": "Subtype", "virus": "Virus", "day": "Day"})
+)
+
+vdf = vdf.merge(stats_by_group, on=["Subtype", "Virus", "Day"], how="left")
+vdf = vdf.merge(
+    strain_counts.rename(columns={"virus": "Virus", "subtype": "Subtype"}),
+    on=["Subtype", "Virus"],
+    how="left",
+)
+
+# OLS interpretation:
+# explained variance = R²
+# unexplained variance = 1 - R²
+vdf["Explained_Variance_pct"] = 100 * vdf["R2"]
+vdf["Residual_Unexplained_pct"] = 100 * (1 - vdf["R2"])
+
+def short_label(virus, day, maxlen=28):
+    v = str(virus).replace("Influenza ", "")[:maxlen]
+    return f"{v} (D{int(day)})"
+
+vdf["Group_short"] = vdf.apply(lambda r: short_label(r["Virus"], r["Day"]), axis=1)
+vdf["Group_label_full"] = vdf.apply(
+    lambda r: f"{short_label(r['Virus'], r['Day'])} [{r['Subtype']}]",
+    axis=1
+)
+
+vdf.to_csv(os.path.join(OUTPUT_ROOT, "replication_variance_decomposition_table.csv"), index=False)
+
+overview_plot_paths = []
+
+# =================================================================
+# 7a. PLOT: OLS R² per group -- one bar per strain/day
+# =================================================================
+df_plot = choice_df.dropna(subset=["Model_Used"]).copy()
+df_plot = df_plot[df_plot["Model_Used"] != "Skipped (n_obs<20)"].copy()
+
+df_plot["Group_short"] = df_plot.apply(lambda r: short_label(r["Virus"], r["Day"]), axis=1)
+df_plot["Group_label_full"] = df_plot.apply(
+    lambda r: f"{short_label(r['Virus'], r['Day'])} [{r['Subtype']}]",
+    axis=1
+)
+
+for subtype in sorted(df_plot["Subtype"].dropna().unique()):
+    sub = (
+        df_plot[df_plot["Subtype"] == subtype]
+        .sort_values("R2", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    fig, ax = plt.subplots(figsize=(max(8, 1.8 * len(sub)), 7))
+    x = np.arange(len(sub))
+
+    bars = ax.bar(
+        x,
+        sub["R2"],
+        width=0.6,
+        color="#4472C4",
+        edgecolor="black",
+        linewidth=0.6,
+    )
+
+    for b in bars:
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            b.get_height() + 0.02,
+            f"{b.get_height():.3f}",
+            ha="center",
+            fontsize=9,
+        )
+
+    for i, vacc in enumerate(sub["Vaccinated"]):
+        ax.text(
+            i,
+            -0.06,
+            vacc,
+            ha="center",
+            va="top",
+            fontsize=7.5,
+            color="gray",
+            style="italic",
+        )
+
+    ax.set_xlabel("Strain (Day)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("R²", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"OLS R² by Strain/Day\nSubtype: {subtype}",
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(sub["Group_short"], rotation=45, ha="right", fontsize=8.5)
+    ax.set_ylim([0, 1.0])
+    ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+
+    outfile = os.path.join(
+        OUTPUT_ROOT,
+        f"01_replication_r2_{subtype.replace('/', '_').replace(' ', '_')}.png",
+    )
+    fig.savefig(outfile, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    overview_plot_paths.append((f"OLS R² ({subtype})", outfile))
+    print(f"Saved: {outfile}")
+
+# =================================================================
+# 7b. PLOT: Residual unexplained variance (%) by group
+# =================================================================
+for subtype in sorted(vdf["Subtype"].dropna().unique()):
+    sub = (
+        vdf[vdf["Subtype"] == subtype]
+        .sort_values("Residual_Unexplained_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    fig, ax = plt.subplots(figsize=(max(8, 1.4 * len(sub)), 7))
+    x = np.arange(len(sub))
+
+    ax.bar(
+        x,
+        sub["Residual_Unexplained_pct"],
+        width=0.6,
+        color="#ED7D31",
+        edgecolor="black",
+        linewidth=0.6,
+    )
+
+    for i, row in sub.iterrows():
+        ax.text(
+            i,
+            row["Residual_Unexplained_pct"] + 1,
+            f"{row['Residual_Unexplained_pct']:.1f}%",
+            ha="center",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    for i, vacc in enumerate(sub["Vaccinated"]):
+        ax.text(
+            i,
+            -6,
+            vacc,
+            ha="center",
+            fontsize=7,
+            color="gray",
+            style="italic",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(sub["Group_label_full"], rotation=45, ha="right")
+    ax.set_ylim(0, 105)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_title(f"Residual Unexplained Variance (%)\n{subtype}")
+
+    plt.tight_layout()
+
+    outfile = os.path.join(
+        OUTPUT_ROOT,
+        f"02_replication_residual_unexplained_{safe_name(subtype)}.png",
+    )
+    fig.savefig(outfile, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved: {outfile}")
+
+# =================================================================
+# 7c. PLOT: Explained vs Unexplained variance -- stacked bar
+# =================================================================
+for subtype in sorted(vdf["Subtype"].unique()):
+    sub = (
+        vdf[vdf["Subtype"] == subtype]
+        .sort_values("Residual_Unexplained_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    fig, ax = plt.subplots(figsize=(max(8, 1.4 * len(sub)), 7))
+    x = np.arange(len(sub))
+
+    ax.bar(
+        x,
+        sub["Explained_Variance_pct"],
+        width=0.6,
+        color="#4472C4",
+        label="Explained variance (R²)",
+    )
+
+    ax.bar(
+        x,
+        sub["Residual_Unexplained_pct"],
+        width=0.6,
+        bottom=sub["Explained_Variance_pct"],
+        color="#ED7D31",
+        label="Unexplained variance (1 - R²)",
+    )
+
+    for i, vacc in enumerate(sub["Vaccinated"]):
+        ax.text(
+            i,
+            -6,
+            vacc,
+            ha="center",
+            fontsize=7,
+            color="gray",
+            style="italic",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(sub["Group_label_full"], rotation=45, ha="right")
+    ax.set_ylim(0, 105)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend()
+    ax.set_title(f"OLS Variance Split (Explained vs Unexplained)\n{subtype}")
+
+    plt.tight_layout()
+
+    outfile = os.path.join(
+        OUTPUT_ROOT,
+        f"03_replication_variance_split_{safe_name(subtype)}.png",
+    )
+    fig.savefig(outfile, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved: {outfile}")
+
+# =================================================================
+# 7d. PLOT: Ranked horizontal bar -- Residual unexplained variance %
+# =================================================================
+for subtype in sorted(vdf["Subtype"].unique()):
+    sub = vdf[vdf["Subtype"] == subtype]
+
+    top_groups = (
+        sub.sort_values("Residual_Unexplained_pct", ascending=False)
+        .head(15)
+        .sort_values("Residual_Unexplained_pct")
+    )
+
+    fig, ax = plt.subplots(figsize=(12, max(5, 0.45 * len(top_groups))))
+    y_pos = np.arange(len(top_groups))
+
+    colors = [
+        "#d73027" if v > 60
+        else "#fee090" if v > 40
+        else "#91bfdb"
+        for v in top_groups["Residual_Unexplained_pct"]
+    ]
+
+    ax.barh(
+        y_pos,
+        top_groups["Residual_Unexplained_pct"],
+        color=colors,
+        edgecolor="black",
+    )
+
+    for i, (_, row) in enumerate(top_groups.iterrows()):
+        ax.text(
+            row["Residual_Unexplained_pct"] + 1,
+            i,
+            f"{row['Residual_Unexplained_pct']:.1f}%",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(top_groups["Group_label_full"])
+    ax.set_xlim(0, 100)
+    ax.axvline(40, ls="--", color="orange")
+    ax.axvline(60, ls="--", color="red")
+    ax.grid(axis="x", alpha=0.3)
+    ax.set_title(f"Residual Unexplained Variance Ranking\n{subtype}")
+
+    plt.tight_layout()
+
+    outfile = os.path.join(
+        OUTPUT_ROOT,
+        f"04_replication_residual_unexplained_ranking_{safe_name(subtype)}.png",
+    )
+    fig.savefig(outfile, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved: {outfile}")
+
+# =================================================================
+# 7e. Std Dev vs Unexplained Variance bubble plot
+# =================================================================
+import itertools
+
+MARKER_CYCLE = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<", ">"]
+
+def plot_std_vs_unexplained(sub_vdf, title, out_path):
+    fig, ax = plt.subplots(figsize=(14, 8))
+
+    strains = sorted(sub_vdf["Virus"].dropna().unique())
+    days = sorted(sub_vdf["Day"].dropna().unique())
+
+    strain_colors = plt.cm.tab20(np.linspace(0, 1, max(len(strains), 1)))
+    strain_color_map = dict(zip(strains, strain_colors))
+
+    marker_cycle = itertools.cycle(MARKER_CYCLE)
+    day_marker_map = {day: next(marker_cycle) for day in days}
+
+    for (virus, day), grp in sub_vdf.groupby(["Virus", "Day"]):
+        ax.scatter(
+            grp["Std_HAI_log2"],
+            grp["Residual_Unexplained_pct"],
+            s=grp["N_Participants"] * 6,
+            alpha=0.75,
+            color=strain_color_map[virus],
+            marker=day_marker_map[day],
+            edgecolors="black",
+            linewidth=0.6,
+        )
+
+    for _, row in sub_vdf.iterrows():
+        ax.annotate(
+            f"{row['Group_short']}\nN={int(row['N_Participants'])}",
+            (row["Std_HAI_log2"], row["Residual_Unexplained_pct"]),
+            textcoords="offset points",
+            xytext=(7, 5),
+            fontsize=7,
+            color="black",
+            linespacing=1.3,
+        )
+
+    ax.set_xlabel("HAI Titer Std Dev (log2 scale)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Unexplained variance (%)", fontsize=11, fontweight="bold")
+    ax.set_title(title, fontsize=13, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+
+    strain_handles = [
+        plt.Line2D(
+            [0], [0],
+            marker="o",
+            color="w",
+            markerfacecolor=strain_color_map[s],
+            markeredgecolor="black",
+            markersize=8,
+            label=s,
+        )
+        for s in strains
+    ]
+    legend1 = ax.legend(
+        handles=strain_handles,
+        title="Strain",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        frameon=True,
+        fontsize=8,
+    )
+    ax.add_artist(legend1)
+
+    day_handles = [
+        plt.Line2D(
+            [0], [0],
+            marker=day_marker_map[d],
+            color="gray",
+            linestyle="None",
+            markeredgecolor="black",
+            markersize=8,
+            label=f"Day {d}",
+        )
+        for d in days
+    ]
+    legend2 = ax.legend(
+        handles=day_handles,
+        title="Day",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 0.55),
+        frameon=True,
+        fontsize=8,
+    )
+    ax.add_artist(legend2)
+
+    size_values = [10, 25, 50, 100]
+    size_values = [n for n in size_values if n <= sub_vdf["N_Participants"].max()]
+    size_handles = [
+        plt.scatter(
+            [],
+            [],
+            s=n * 6,
+            color="gray",
+            alpha=0.75,
+            edgecolors="black",
+            linewidth=0.6,
+            label=f"N={n}",
+        )
+        for n in size_values
+    ]
+    ax.legend(
+        handles=size_handles,
+        title="Sample size",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 0.15),
+        frameon=True,
+        fontsize=8,
+    )
+
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
+p5 = os.path.join(OUTPUT_ROOT, "05_replication_stddev_vs_unexplained_all.png")
+plot_std_vs_unexplained(vdf, "Std Dev vs Unexplained Variance (color=strain, shape=day, size=N)", p5)
+overview_plot_paths.append(("Std Dev vs Unexplained Variance — All Subtypes", p5))
+
+for st in vdf["Subtype"].unique():
+    sub = vdf[vdf["Subtype"] == st]
+    p_st = os.path.join(OUTPUT_ROOT, f"05_replication_stddev_vs_unexplained_{safe_name(st)}.png")
+    plot_std_vs_unexplained(sub, f"Std Dev vs Unexplained Variance — Subtype {st}", p_st)
+    overview_plot_paths.append((f"Std Dev vs Unexplained Variance — Subtype {st}", p_st))
+
+
+
+
+# =================================================================
+# 8. DESCRIPTIVE PLOTS per (subtype, virus, day), saved into a
+#    subtype/strain/day folder tree
+# =================================================================
+BASE_DESC_DIR = os.path.join(OUTPUT_ROOT, "replication_descriptive_by_subtype_strain_day")
+os.makedirs(BASE_DESC_DIR, exist_ok=True)
+
+
+def plot_group_matplotlib(sub_df, label, out_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    axes[0, 0].hist(sub_df["log2_HAI"], bins=10, alpha=0.7, color="#4472C4", edgecolor="black")
+    axes[0, 0].set_xlabel("Value (log2)")
+    axes[0, 0].set_ylabel("Count")
+    axes[0, 0].set_title("HAI distribution")
+
+    axes[0, 1].scatter(sub_df["age"], sub_df["log2_HAI"], alpha=0.3, color="#ED7D31")
+    axes[0, 1].set_xlabel("Age")
+    axes[0, 1].set_ylabel("log2 HAI")
+    axes[0, 1].set_title("Age vs HAI")
+
+    if sub_df["sex"].nunique() > 1:
+        sub_df.boxplot(column="log2_HAI", by="sex", ax=axes[1, 0])
+        axes[1, 0].set_title("HAI by sex")
+        axes[1, 0].set_xlabel("sex")
+        axes[1, 0].set_ylabel("log2 HAI")
+        fig.suptitle("")
+    else:
+        axes[1, 0].axis("off")
+
+    axes[1, 1].axis("off")
+    fig.suptitle(label, fontsize=11)
+    plt.tight_layout()
+
+    os.makedirs(out_dir, exist_ok=True)
+    fig_path = os.path.join(out_dir, "replication_summary_plots.png")
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    sub_df["log2_HAI"].describe().to_csv(os.path.join(out_dir, "replication_summary_stats.csv"))
+    return fig_path
+
+
+desc_plot_paths = {}  # key -> png path, for embedding in the HTML report
+
+for (subtype_name, virus_name, day_val), sub_df in clean.groupby(["subtype", "virus", "day"]):
+    vacc_status = sub_df["vaccinated"].iloc[0]
+    n_obs = len(sub_df)
+    label = f"{virus_name} | Subtype {subtype_name} | Day {day_val} | {vacc_status} | N={n_obs}"
+
+    out_dir = os.path.join(
+        BASE_DESC_DIR, safe_name(subtype_name), safe_name(virus_name),
+        f"Day{int(day_val)}__{safe_name(vacc_status)}",
+    )
+    fig_path = plot_group_matplotlib(sub_df, label, out_dir)
+    desc_plot_paths[(subtype_name, virus_name, day_val)] = fig_path
+
+print(f"\nDescriptive plots saved under: {BASE_DESC_DIR}")
+
+
+
+
+
+# %%
+# %%
+# ---------------------------------------------------------------
+# PLOT: Scatter -- Residual Unexplained Variance % vs raw titer variability
+# One PNG for All data, then one PNG per subtype,
+# colored by strain, shaped by day,
+# sized by N, with a sample-size legend
+# ---------------------------------------------------------------
+import os
+import itertools
+import numpy as np
+import matplotlib.pyplot as plt
+
+def safe_name(s):
+    return (
+        str(s)
+        .replace("/", "_")
+        .replace(" ", "_")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+# Marker shapes to cycle through for "Day"
+MARKER_CYCLE = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<", ">"]
+
+def short_label(virus, day):
+    return f"{virus}, Day {day}"
+
+# Add "All" first, then each subtype
+plot_groups = ["All"] + sorted(vdf["Subtype"].dropna().unique())
+
+for subtype in plot_groups:
+
+    if subtype == "All":
+        sub = vdf.copy()
+        subtype_label = "All Subtypes"
+        subtype_file = "All"
+    else:
+        sub = vdf[vdf["Subtype"] == subtype].copy()
+        subtype_label = f"Subtype: {subtype}"
+        subtype_file = subtype
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # --- build strain -> color and day -> marker mappings ---
+    strains = sorted(sub["Virus"].dropna().unique())
+    days = sorted(sub["Day"].dropna().unique())
+
+    strain_colors = plt.cm.tab20(np.linspace(0, 1, max(len(strains), 1)))
+    strain_color_map = dict(zip(strains, strain_colors))
+
+    marker_cycle = itertools.cycle(MARKER_CYCLE)
+    day_marker_map = {day: next(marker_cycle) for day in days}
+
+    # --- plot one small scatter per (strain, day) group ---
+    for (virus, day), grp in sub.groupby(["Virus", "Day"]):
+        ax.scatter(
+            grp["Std_HAI_log2"],
+            grp["Residual_Unexplained_pct"],
+            s=grp["N_Participants"] * 4,
+            alpha=0.75,
+            color=strain_color_map[virus],
+            marker=day_marker_map[day],
+            edgecolors="black",
+            linewidth=0.5,
+        )
+
+    # Point labels: strain + day, plus sample size
+    for _, row in sub.iterrows():
+        ax.annotate(
+            f"{short_label(row['Virus'], row['Day'])}\nN={row['N_Participants']}",
+            (row["Std_HAI_log2"], row["Residual_Unexplained_pct"]),
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=7.5,
+        )
+
+    ax.set_xlabel("HAI Titer Std Dev (log2 scale)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Unexplained variance (%)", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"Raw HAI Titer Variability vs. Residual Variance (%) After Covariate Adjustment\n{subtype_label}",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.grid(True, alpha=0.3)
+
+    # --- Legend 1: Strain (color) ---
+    strain_handles = [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=strain_color_map[s], markeredgecolor="black",
+                   markersize=8, label=s)
+        for s in strains
+    ]
+    legend1 = ax.legend(
+        handles=strain_handles,
+        title="Strain",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        frameon=True,
+        fontsize=8,
+    )
+    ax.add_artist(legend1)
+
+    # --- Legend 2: Day (marker shape) ---
+    day_handles = [
+        plt.Line2D([0], [0], marker=day_marker_map[d], color="gray",
+                   linestyle="None", markeredgecolor="black",
+                   markersize=8, label=f"Day {d}")
+        for d in days
+    ]
+    legend2 = ax.legend(
+        handles=day_handles,
+        title="Day",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 0.55),
+        frameon=True,
+        fontsize=8,
+    )
+    ax.add_artist(legend2)
+
+    # --- Legend 3: Sample size (bubble size) ---
+    size_values = [10, 25, 50, 100]
+    size_values = [n for n in size_values if n <= sub["N_Participants"].max()]
+    size_handles = [
+        plt.scatter([], [], s=n * 4, color="gray", alpha=0.75,
+                    edgecolors="black", linewidth=0.5, label=f"N={n}")
+        for n in size_values
+    ]
+    ax.legend(
+        handles=size_handles,
+        title="Sample size",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 0.15),
+        frameon=True,
+        fontsize=8,
+    )
+
+    plt.tight_layout()
+
+    outfile = os.path.join(
+        OUTPUT_ROOT,
+        f"03_replication_residual(relative)_vs_std_dev_{safe_name(subtype_file)}.png"
+    )
+    fig.savefig(outfile, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+print("Saved all plots.")
+
