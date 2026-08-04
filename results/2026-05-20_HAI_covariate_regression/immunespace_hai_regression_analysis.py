@@ -1,8 +1,8 @@
-
-!{sys.executable} -m pip install ipykernel --upgrade --force-reinstall
-!{sys.executable} -m pip install statsmodels
-!{sys.executable} -m pip install matplotlib
-!{sys.executable} -m pip install patsy
+#!{sys.executable} -m pip install ipykernel --upgrade --force-reinstall
+#!{sys.executable} -m pip install statsmodels
+#!{sys.executable} -m pip install matplotlib
+#!{sys.executable} -m pip install patsy
+#!{sys.executable} -m pip install upsetplot
 
 import sys
 import pandas as pd 
@@ -112,7 +112,7 @@ mask = (
 final_merge = final_merge[~mask]
 
 
-final_merge["Race_demo"].value_counts(dropna=False) 
+final_merge["Race_hai"].value_counts(dropna=False) 
 
 #add subtype mapping to final_merge dataframe
 subtype_map = {
@@ -156,80 +156,136 @@ final_merge.loc[final_merge["subtype"].isna(), "Virus"].unique()
 #check that all participant IDs in final_merge are present in the hai table after filtering
 set(final_merge['Participant ID_merge1']).issubset(set(hai['Participant ID']))
 
-
+#additional filters
 final_merge["Cohort for regression"] = final_merge["Description_merge2"].fillna(final_merge["Cohort"])
 
-### pre HAI demographics and distribution plots
+final_merge = final_merge[final_merge["Age Reported_demo"] >= 18]
 
+cohorts_to_remove = ["18-30 year old monozygotic twins trivalent influenza vaccine","40-64 year old monozygotic twins trivalent influenza vaccine", "40-59 year old monozygotic twins trivalent influenza vaccine", "18-30 year old dizygotic twins trivalent influenza vaccine", "70-100 year old monozygotic or dizygotic twin pairs given  IIV3", "40-59 year old dizygotic twins trivalent influenza vaccine", "40-64 year old dizygotic twins trivalent influenza vaccine", "18-30 year old monozygotic twins pairs given  LAIV3", 
+                     "18-30 year old dizygotic twin pairs given  LAIV3", "40-49 year old dizygotic twin pairs given  LAIV3", "40-49 year old monozygotic twin pairs given  LAIV3"]
+
+final_merge = final_merge[~final_merge["Cohort for regression"].isin(cohorts_to_remove)]
+
+
+mask_keep = (
+    final_merge["Phenotype"].str.contains("Non-twin", case=False, na=False) |
+    final_merge["Phenotype"].str.contains("Non-Twin", case=False, na=False) |
+    ~final_merge["Phenotype"].str.contains("twin", case=False, na=False)
+)
+
+final_merge = final_merge[mask_keep]
+
+
+
+
+
+OUTPUT_ROOT = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/immunespace_hai_regression_results"
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+
+
+### pre HAI demographics and distribution plots
+####plots needed for lab notebook
+ 
+"""
+UpSet plots: Participants x Days, computed separately per strain.
+
+Sets     = Study Time Collected (Day 0, Day 28, ...)
+Elements = participants (new_participant_id)
+Split by = strain (subtype, or Virus for finer granularity)
+
+For each strain, this shows how many participants were sampled at each day,
+and which combinations of days each participant was sampled at -- so you can
+compare e.g. "H1N1 day-overlap" vs "H3N2 day-overlap".
+
+
+"""
+
+import pandas as pd
+from upsetplot import from_memberships, UpSet
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------------
+# Load your data here. Replace this with your actual source (csv, etc.)
+
+
+# df = pd.read_csv("your_file.csv")
+# ------------------------------------------------------------------
+df = final_merge.copy()  # assumes `df` is already the dataframe shown in your message
+
+# use `subtype` (H1N1/H3N2/Yamagata/...) for the strain grouping.
+# swap to "Virus" instead if you want individual reference-strain granularity
+# (e.g. A/South Dakota/06/2007 vs A/Uruguay/716/2007) rather than subtype.
+strain_col = "Virus"
+
+# one row per (participant, day, strain), regardless of everything else
+part_day_strain = (
+    df[["Participant ID_merge1", "Study Time Collected", strain_col]]
+    .dropna(subset=["Study Time Collected", strain_col])
+    .drop_duplicates()
+)
+
+strains = sorted(part_day_strain[strain_col].unique())
+
+for strain in strains:
+    subset = part_day_strain[part_day_strain[strain_col] == strain]
+
+    # for each participant, which set of days were they sampled at for this strain?
+    memberships = (
+        subset.groupby("Participant ID_merge1")["Study Time Collected"]
+        .apply(lambda s: [f"Day {int(d)}" for d in sorted(s.unique())])
+        .tolist()
+    )
+
+    upset_data = from_memberships(memberships)
+
+    fig = plt.figure(figsize=(10, 6))
+    UpSet(
+        upset_data,
+        subset_size="count",
+        show_counts=True,
+        sort_by="cardinality",
+    ).plot(fig=fig)
+    plt.suptitle(f"Participant overlap across collection days -- {strain}")
+
+    safe_name = str(strain).replace("/", "-").replace(" ", "_")
+    plt.savefig(OUTPUT_ROOT + f"/upset_participants_by_day_{safe_name}.png",
+        dpi=150,
+        bbox_inches="tight",
+    )
+
+plt.show()
+
+
+
+
+### pre HAI demographics and distribution plots
+### One PNG per strain: 3 facets (distribution / age vs HAI / HAI by sex),
+### with Day plotted as different colors (shared legend) within each facet.
+### PNGs are organized into subfolders by subtype for easy cross-strain comparison.
+
+import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+import pandas as pd
 
 # ---- config ----
 STRAIN_COL = "Virus"
-COHORT_COL = "Cohort for regression"
+COHORT_COL = "Cohort"
 DAY_COL = "Study Time Collected"
 DAY_UNIT_COL = "Study Time Collected Unit"
 SUBTYPE_COL = "subtype"
-MIN_N = 10
+AGE_COL = "Age Reported_hai"
+GENDER_COL = "Gender_hai"
+HAI_COL = "log2_HAI"
+MIN_N = 15  # per strain/day slice; days below this are dropped before plotting
 
-outdir = os.path.join(SCRATCH, "final_hai_demo_plots_html")
+
+outdir = os.path.join(OUTPUT_ROOT, "final_hai_strain_faceted_demo_data_png")
 os.makedirs(outdir, exist_ok=True)
 
-
-def make_group_figure(df, title):
-    """Build the 2x2 subplot figure for a single strain/day slice."""
-    fig = make_subplots(
-        rows=2,
-        cols=2,
-        subplot_titles=("HAI distribution", "Age vs HAI", "HAI by sex", ""),
-        vertical_spacing=0.12,
-        horizontal_spacing=0.10,
-    )
-
-    # Histogram
-    fig.add_trace(
-        go.Histogram(
-            x=df["log2_HAI"], nbinsx=10, name="log2_HAI", opacity=0.7
-        ),
-        row=1,
-        col=1,
-    )
-
-    # Scatter: age vs HAI
-    fig.add_trace(
-        go.Scatter(
-            x=df["Age Reported_demo"],
-            y=df["log2_HAI"],
-            mode="markers",
-            marker=dict(opacity=0.3),
-            name="Age vs HAI",
-        ),
-        row=1,
-        col=2,
-    )
-
-    # Box: sex vs HAI
-    if df["Gender_demo"].nunique() > 1:
-        for gender, gdf in df.groupby("Gender_demo"):
-            fig.add_trace(
-                go.Box(y=gdf["log2_HAI"], name=str(gender), boxmean=True),
-                row=2,
-                col=1,
-            )
-
-    fig.update_xaxes(title_text="Value (log2)", row=1, col=1)
-    fig.update_yaxes(title_text="Count", row=1, col=1)
-    fig.update_xaxes(title_text="Age", row=1, col=2)
-    fig.update_yaxes(title_text="log2 HAI", row=1, col=2)
-    fig.update_xaxes(title_text="Gender", row=2, col=1)
-    fig.update_yaxes(title_text="log2 HAI", row=2, col=1)
-
-    fig.update_layout(
-        title=title,
-        width=1100,
-        height=750,
-        showlegend=False,
-        template="plotly_white",
-    )
-    return fig
+sns.set_style("whitegrid")
 
 
 def slugify(s):
@@ -242,112 +298,129 @@ def slugify(s):
     )
 
 
-# ---- build one combined HTML report ----
-strains = sorted(final_merge[STRAIN_COL].dropna().unique())
+def make_strain_facet_png(strain_df, strain, subtype, day_col, out_path):
+    """Build a 1x4 facet PNG for one strain: distribution, age vs HAI, HAI by sex, HAI by phenotype.
+    Days are colored consistently across all four panels with one shared legend.
+    """
+    days = sorted(strain_df[day_col].dropna().unique())
+    palette = dict(zip(days, sns.color_palette("tab10", n_colors=len(days))))
 
-toc_entries = []  # (anchor_id, display_label)
-body_sections = []  # rendered HTML chunks
-total_plots = 0
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
 
-for strain in strains:
-    strain_df = final_merge[final_merge[STRAIN_COL] == strain]
-    days = sorted(strain_df[DAY_COL].dropna().unique())
-
-    strain_anchor = f"strain_{slugify(strain)}"
-    strain_section_plots = []
-
-    for day in days:
-        day_df = strain_df[strain_df[DAY_COL] == day]
-        n = len(day_df)
-
-        if n < MIN_N:
-            print(f"Skipping {strain} / Day {day} (n={n} < {MIN_N})")
-            continue
-
-        subtype = (
-            day_df[SUBTYPE_COL].dropna().iloc[0]
-            if SUBTYPE_COL in day_df.columns
-            and day_df[SUBTYPE_COL].notna().any()
-            else "NA"
-        )
-        day_unit = (
-            day_df[DAY_UNIT_COL].dropna().iloc[0]
-            if DAY_UNIT_COL in day_df.columns
-            and day_df[DAY_UNIT_COL].notna().any()
-            else ""
-        )
-        cohorts = ", ".join(
-            sorted(day_df[COHORT_COL].dropna().unique().astype(str))
-        )
-
-        label = f"{strain} — Day {day} {day_unit} — Subtype: {subtype} — N={n}"
-        print(f"\n=== {label} ===")
-        print(day_df["log2_HAI"].describe())
-
-        fig = make_group_figure(day_df, label)
-
-        day_anchor = f"{strain_anchor}_day_{slugify(day)}"
-        toc_entries.append((day_anchor, label))
-
-        # include_plotlyjs='cdn' ensures a clean single-script dependency without inline bundle bloating
-        section_html = f"""
-        <div id="{day_anchor}" class="plot-section">
-            <h3>{label}</h3>
-            <p class="meta">Cohort(s): {cohorts}</p>
-            {fig.to_html(full_html=False, include_plotlyjs="cdn")}
-        </div>
-        """
-        strain_section_plots.append(section_html)
-        total_plots += 1
-
-    if strain_section_plots:
-        body_sections.append(f'<h2 id="{strain_anchor}">{strain}</h2>')
-        body_sections.extend(strain_section_plots)
-
-# ---- assemble final HTML ----
-toc_html = (
-    "<ul>"
-    + "".join(
-        f'<li><a href="#{anchor}">{label}</a></li>'
-        for anchor, label in toc_entries
+    # --- Panel 1: HAI distribution, colored by day ---
+    # Outlined step histograms (no fill) so overlapping day-colors stay
+    # readable as distinct lines instead of blending into a solid mass.
+    sns.histplot(
+        data=strain_df,
+        x=HAI_COL,
+        hue=day_col,
+        palette=palette,
+        multiple="layer",
+        fill=False,
+        element="step",
+        linewidth=2.2,
+        bins=10,
+        ax=axes[0],
+        legend=False,
     )
-    + "</ul>"
+    axes[0].set_title("HAI distribution")
+    axes[0].set_xlabel("log2 HAI")
+    axes[0].set_ylabel("Count")
+
+    # --- Panel 2: Age vs HAI, colored by day ---
+    sns.scatterplot(
+        data=strain_df,
+        x=AGE_COL,
+        y=HAI_COL,
+        hue=day_col,
+        palette=palette,
+        alpha=0.5,
+        ax=axes[1],
+        legend=False,
+    )
+    axes[1].set_title("Age vs HAI")
+    axes[1].set_xlabel("Age")
+    axes[1].set_ylabel("log2 HAI")
+
+    # --- Panel 3: HAI by sex, colored by day (grouped boxplot) ---
+    sns.boxplot(
+        data=strain_df,
+        x=GENDER_COL,
+        y=HAI_COL,
+        hue=day_col,
+        palette=palette,
+        ax=axes[2],
+    )
+    axes[2].set_title("HAI by sex")
+    axes[2].set_xlabel("Gender")
+    axes[2].set_ylabel("log2 HAI")
+    axes[2].legend_.remove()  # remove per-axis legend, add one shared legend below
+    
+
+
+    # --- shared legend for Day, placed once for the whole figure ---
+    handles = [mpatches.Patch(color=palette[d], label=f"Day {d}") for d in days]
+    fig.legend(
+        handles=handles,
+        title=day_col,
+        loc="lower center",
+        ncol=min(len(days), 8),
+        bbox_to_anchor=(0.5, -0.05),
+        frameon=False,
+    )
+
+    n_total = len(strain_df)
+    fig.suptitle(f"{strain}  (Subtype: {subtype}, N={n_total})", fontsize=14, y=1.03)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---- build one PNG per strain, grouped into subtype subfolders ----
+final_merge["_subtype_filled"] = (
+    final_merge[SUBTYPE_COL].fillna("NA") if SUBTYPE_COL in final_merge.columns else "NA"
 )
 
-html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>HAI Distribution Report by Strain and Day</title>
-<style>
-    body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.5; }}
-    h1 {{ border-bottom: 2px solid #333; padding-bottom: 8px; }}
-    h2 {{ margin-top: 50px; color: #1a5276; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
-    h3 {{ margin-top: 30px; color: #444; }}
-    .meta {{ color: #666; font-size: 0.9em; }}
-    .plot-section {{ margin-bottom: 40px; }}
-    #toc {{ background: #f7f7f7; padding: 15px 25px; border-radius: 8px; margin-bottom: 30px; }}
-    #toc a {{ text-decoration: none; color: #1a5276; }}
-    #toc a:hover {{ text-decoration: underline; }}
-    #toc ul {{ margin-bottom: 0; }}
-</style>
-</head>
-<body>
-<h1>HAI Distribution by Strain / Day</h1>
-<p>Total plots: {total_plots} (groups with N &lt; {MIN_N} excluded)</p>
-<div id="toc"><strong>Jump to:</strong>{toc_html}</div>
-{''.join(body_sections)}
-</body>
-</html>
-"""
+subtypes = sorted(final_merge["_subtype_filled"].dropna().unique())
+saved_files = []
 
-filepath = os.path.join(outdir, "hai_report_by_strain_day.html")
-with open(filepath, "w", encoding="utf-8") as f:
-    f.write(html)
+for subtype in subtypes:
+    subtype_df = final_merge[final_merge["_subtype_filled"] == subtype]
+    subtype_dir = os.path.join(outdir, f"subtype_{slugify(subtype)}")
+    os.makedirs(subtype_dir, exist_ok=True)
 
-print(f"\nSaved combined report: {filepath}")
+    strains = sorted(subtype_df[STRAIN_COL].dropna().unique())
+
+    for strain in strains:
+        strain_df_full = subtype_df[subtype_df[STRAIN_COL] == strain].copy()
+
+        # drop days with too few samples, same as before, but keep the rest together
+        day_counts = strain_df_full[DAY_COL].value_counts()
+        valid_days = day_counts[day_counts >= MIN_N].index
+        strain_df = strain_df_full[strain_df_full[DAY_COL].isin(valid_days)]
+
+        if strain_df.empty:
+            print(f"Skipping {strain} (subtype {subtype}): no day group with N >= {MIN_N}")
+            continue
+
+        dropped = set(strain_df_full[DAY_COL].dropna().unique()) - set(valid_days)
+        if dropped:
+            print(f"{strain}: dropping days {sorted(dropped)} (N < {MIN_N})")
+
+        fname = f"{slugify(strain)}.png"
+        out_path = os.path.join(subtype_dir, fname)
+
+        make_strain_facet_png(strain_df, strain, subtype, DAY_COL, out_path)
+        saved_files.append(out_path)
+        print(f"Saved: {out_path}")
+
+print(f"\nDone. {len(saved_files)} PNGs saved under {outdir}")
 
 
+
+#table of  phenotype value counts
+
+final_merge["Phenotype"].value_counts()
 
 
 
@@ -387,8 +460,6 @@ script).
 
 
 
-OUTPUT_ROOT = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/final_hai_regression_results"
-os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 # ---------------------------------------------------------------
 # 1. LOAD + CLEAN (same as original)
@@ -398,7 +469,7 @@ df.columns = df.columns.str.strip()
 
 COLUMNS = {
     "outcome": "log2_HAI",
-    "age": "Age Reported_demo",
+    "age": "Age Reported_hai",
     "sex": "Gender_demo",
     "cohort": "Cohort for regression",
     "virus": "Virus",
@@ -1224,9 +1295,6 @@ print(f"Saved: {outfile}")
 
 
 
-
-
-
 """
 HAI model diagnostics: QQ plots, residual checks, and performance metrics
 ===========================================================================
@@ -1236,7 +1304,6 @@ adds Subtype to the performance summary.
 # ---------------------------------------------------------------
 # Diagnostics: use the same subtype source as the rest of the script
 # ---------------------------------------------------------------
-
 DIAG_DIR = os.path.join(OUTPUT_ROOT, "final_model_diagnostics_by_subtype")
 os.makedirs(DIAG_DIR, exist_ok=True)
 
@@ -1379,559 +1446,632 @@ perf_df.to_csv(os.path.join(OUTPUT_ROOT, "model_performance_summary_by_subtype.c
 
 
 
-
-
-
-
-
-
-
-# =================================================================
-# 9. BUILD SINGLE-PAGE HTML REPORT WITH STICKY TOC AND INDEX
-#    Subtype-aware + includes diagnostics plots
-# =================================================================
-
-def img_to_base64(path):
-    """Converts an image file to a base64 string for direct HTML embedding."""
-    if not path or not os.path.exists(path):
-        return ""
-    with open(path, "rb") as image_file:
-        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
-    return f"data:image/png;base64,{encoded_string}"
-
-
-print("\nGenerating unified HTML report...")
-
-# -----------------------------------------------------------------
-# Build lookup tables for report content
-# -----------------------------------------------------------------
-# One descriptive plot per (Subtype, Virus, Day)
-desc_lookup = {}
-for key, path in desc_plot_paths.items():
-    desc_lookup[key] = path
-
-# One diagnostic plot per (Subtype, Virus, Day) and one chosen model row
-diag_lookup = {}
-perf_lookup = {}
-
-for _, row in perf_df.iterrows():
-    key = (row["Subtype"], row["Virus"], row["Day"])
-    perf_lookup[key] = row
-
-    # keep first valid diagnostic plot path for each group
-    if key not in diag_lookup and pd.notna(row.get("Diagnostic_Plot", np.nan)):
-        diag_lookup[key] = row["Diagnostic_Plot"]
-
-# 1. Gather all global overview plot base64 strings
-overview_b64 = []
-for title, path in overview_plot_paths:
-    if os.path.exists(path):
-        overview_b64.append((title, img_to_base64(path)))
-
-# 2. Build TOC structure grouped by Subtype -> Strain -> Day
-tree = {}
-for (subtype_name, virus_name, day_val), sub_df in clean.groupby(["subtype", "virus", "day"]):
-    st = str(subtype_name)
-    vi = str(virus_name)
-    d = int(day_val)
-
-    if st not in tree:
-        tree[st] = {}
-    if vi not in tree[st]:
-        tree[st][vi] = {}
-
-    key = (subtype_name, virus_name, day_val)
-    perf_row = perf_lookup.get(key, None)
-
-    tree[st][vi][d] = {
-        "n_obs": len(sub_df),
-        "vacc": sub_df["vaccinated"].iloc[0],
-        "desc_img": img_to_base64(desc_lookup.get(key, "")),
-        "diag_img": img_to_base64(diag_lookup.get(key, "")),
-        "model_used": perf_row["Model"] if perf_row is not None else "N/A",
-        "rmse": perf_row["RMSE"] if perf_row is not None else np.nan,
-        "aic": perf_row["AIC"] if perf_row is not None else np.nan,
-        "bic": perf_row["BIC"] if perf_row is not None else np.nan,
-        "r2_marg": perf_row["Marginal_R2"] if perf_row is not None else np.nan,
-        "r2_cond": perf_row["Conditional_R2"] if perf_row is not None else np.nan,
-        "shapiro_p": perf_row["Shapiro_p"] if perf_row is not None else np.nan,
-        "normal_ok": perf_row["Residuals_Normal_at_0.05"] if perf_row is not None else np.nan,
-    }
-
-# 3. Construct HTML Content
-html_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HAI Regression & Variance Analysis Report</title>
-    <style>
-        :root {{
-            --primary-color: #2c3e50;
-            --secondary-color: #3498db;
-            --bg-color: #f8f9fa;
-            --sidebar-width: 320px;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            background-color: var(--bg-color);
-            color: #333;
-            display: flex;
-        }}
-        #sidebar {{
-            width: var(--sidebar-width);
-            height: 100vh;
-            position: sticky;
-            top: 0;
-            background: #ffffff;
-            border-right: 1px solid #e0e0e0;
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            z-index: 100;
-        }}
-        #sidebar-header {{
-            padding: 15px;
-            background: var(--primary-color);
-            color: white;
-        }}
-        #sidebar-header h2 {{
-            margin: 0 0 10px 0;
-            font-size: 1.1rem;
-        }}
-        #search-input {{
-            width: 100%;
-            padding: 8px 12px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            box-sizing: border-box;
-            font-size: 0.9rem;
-        }}
-        #toc-container {{
-            flex: 1;
-            overflow-y: auto;
-            padding: 15px;
-        }}
-        .toc-subtype {{
-            font-weight: bold;
-            margin-top: 10px;
-            font-size: 0.95rem;
-            color: var(--primary-color);
-        }}
-        .toc-strain {{
-            margin-left: 10px;
-            font-size: 0.85rem;
-            margin-top: 5px;
-            color: #555;
-        }}
-        .toc-day-list {{
-            margin-left: 15px;
-            list-style-type: none;
-            padding-left: 0;
-            font-size: 0.8rem;
-        }}
-        .toc-day-list li {{
-            margin: 3px 0;
-        }}
-        .toc-day-list a {{
-            color: var(--secondary-color);
-            text-decoration: none;
-        }}
-        .toc-day-list a:hover {{
-            text-decoration: underline;
-        }}
-        #main-content {{
-            flex: 1;
-            padding: 30px;
-            max-width: 1200px;
-            box-sizing: border-box;
-        }}
-        h1 {{
-            color: var(--primary-color);
-            border-bottom: 2px solid var(--primary-color);
-            padding-bottom: 10px;
-        }}
-        h2 {{
-            color: var(--primary-color);
-            margin-top: 40px;
-            border-bottom: 1px solid #ccc;
-            padding-bottom: 5px;
-        }}
-        h3 {{
-            color: #444;
-            margin-top: 25px;
-        }}
-        .card {{
-            background: white;
-            border-radius: 6px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
-            padding: 20px;
-            margin-bottom: 25px;
-        }}
-        .annotation-box {{
-            background: #eef7fc;
-            border-left: 4px solid var(--secondary-color);
-            padding: 10px 15px;
-            margin: 10px 0 20px 0;
-            font-weight: 500;
-            font-size: 0.9rem;
-        }}
-        .plot-img {{
-            max-width: 100%;
-            height: auto;
-            border: 1px solid #eee;
-            border-radius: 4px;
-            margin-top: 10px;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 15px 0;
-            font-size: 0.85rem;
-        }}
-        th, td {{
-            text-align: left;
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-        }}
-        th {{
-            background-color: #f2f2f2;
-        }}
-        .badge {{
-            display: inline-block;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 0.75rem;
-            font-weight: bold;
-            color: white;
-        }}
-        .badge-lmm {{ background-color: #27ae60; }}
-        .badge-ols {{ background-color: #e67e22; }}
-        .badge-good {{ background-color: #2ecc71; }}
-        .badge-bad {{ background-color: #e74c3c; }}
-    </style>
-</head>
-<body>
-
-    <div id="sidebar">
-        <div id="sidebar-header">
-            <h2>HAI Analysis Index</h2>
-            <input type="text" id="search-input" onkeyup="filterTOC()" placeholder="Search Strain or Subtype...">
-        </div>
-        <div id="toc-container">
-            <div class="toc-subtype"><a href="#overview" style="color: inherit; text-decoration: none;">📊 Global Summaries</a></div>
-            <hr style="border: 0; border-top: 1px solid #eee; margin: 10px 0;">
 """
+build_html_report.py
+=====================
+Assembles ONE self-contained HTML page from everything the pipeline script
+produces, in this order:
 
-# Sidebar TOC
-for subtype, strains in tree.items():
-    sub_id = safe_name(subtype)
-    html_content += f'<div class="toc-group"><div class="toc-subtype">Subtype: {subtype}</div>\n'
-    for strain, days in strains.items():
-        strain_id = safe_name(strain)
-        html_content += f'<div class="toc-strain">🦠 {strain[:25]}...</div><ul class="toc-day-list">\n'
-        for day in sorted(days.keys()):
-            target_id = f"{sub_id}__{strain_id}__D{day}"
-            html_content += f'<li><a href="#{target_id}">Day {day} (N={days[day]["n_obs"]})</a></li>\n'
-        html_content += '</ul>\n'
-    html_content += '</div>\n'
+  1. Participant / Day Overlap (UpSet plots)
+  2. Demographic / HAI Distribution Plots (faceted, per subtype -> strain)
+  3. Phenotype Value Counts
+  4. Strain-Level Counts (N samples / studies / cohorts / days)
+  5. Regression Overview Plots
+       - Marginal vs Conditional R^2 (01_r2_marginal_vs_conditional_*)
+       - Cohort contribution gap (02_r2_cohort_contribution_gap_*)
+       - Variance decomposition stacked bars (03_variance_decomposition_*)
+       - Residual variance ranking (04_residual_variance_ranking_*)
+       - Std Dev vs Residual Variance bubble plots (05_stddev_vs_residual_*)
+       - Residual (%) vs Std Dev scatter (03_residual(relative)_vs_std_dev_*)
+  6. Regression Results (Coefficients) -- estimate / SE / p / CI per term
+  7. Model Choice Log (LMM vs OLS vs skipped, per subtype/strain/day)
+  8. Variance Decomposition Table (cohort vs residual variance, % split)
+  9. Descriptive Plots by Subtype -> Strain -> Day (summary_plots.png +
+     summary_stats.csv from descriptive_by_subtype_strain_day/)
+  10. Model Performance & Diagnostics (QQ / residual plots + fit metrics)
 
-html_content += """
-        </div>
-    </div>
+Images are embedded as base64 so the resulting .html file is fully
+portable -- no external image files needed.
 
-    <div id="main-content">
-        <h1>HAI Regression & Variance Analysis</h1>
+USAGE
+-----
+Run this after the full pipeline has executed in the same session, so
+these are already in memory: OUTPUT_ROOT, DIAG_DIR, final_merge, perf_df,
+lmm_results, ols_results, vacc_label, choice_df, vdf, strain_counts.
+Then call:
 
-        <section id="overview" class="card">
-            <h2>Global Subtype & Variance Summaries</h2>
-            <p>Aggregated diagnostics and model fits across all evaluated viral subtypes and study cohorts.</p>
+    generate_master_html_report()
+
+It writes: OUTPUT_ROOT/master_report.html
+
+Anything not in memory is re-loaded from the CSVs the pipeline already
+saves to OUTPUT_ROOT (strain_level_counts.csv, hai_model_choice_log.csv,
+variance_decomposition_table.csv, model_performance_summary_by_subtype.csv),
+so this also works run standalone in a later session -- just set
+OUTPUT_ROOT and DIAG_DIR first.
 """
-
-for title, b64_str in overview_b64:
-    html_content += f"""
-            <h3>{title}</h3>
-            <img class="plot-img" src="{b64_str}" alt="{title}">
-"""
-
-html_content += """
-        </section>
-
-        <h2>Subtype & Strain Diagnostics</h2>
-"""
-
-# Main content
-for subtype, strains in tree.items():
-    sub_id = safe_name(subtype)
-    html_content += f'<div id="sec_{sub_id}">'
-
-    html_content += f"""
-        <div class="card">
-            <h2>Subtype: {subtype}</h2>
-        </div>
-    """
-
-    for strain, days in strains.items():
-        strain_id = safe_name(strain)
-        annot = strain_annotation_text(strain)
-
-        html_content += f"""
-        <div class="card">
-            <h3>Strain: {strain} <small>({subtype})</small></h3>
-            <div class="annotation-box">
-                📌 <strong>Strain Annotation Summary:</strong> {annot}
-            </div>
-        """
-
-        for day in sorted(days.keys()):
-            target_id = f"{sub_id}__{strain_id}__D{day}"
-            data = days[day]
-
-            model_cls = "badge-lmm" if data["model_used"] == "LMM" else "badge-ols"
-            normal_cls = "badge-good" if bool(data["normal_ok"]) else "badge-bad"
-
-            html_content += f"""
-            <div id="{target_id}" style="border-top: 1px dashed #ccc; padding-top: 15px; margin-top: 20px;">
-                <h4>Day {day} Analysis</h4>
-                <table>
-                    <tr>
-                        <th>Observation Count (N)</th>
-                        <th>Vaccination Status</th>
-                        <th>Model Selected</th>
-                        <th>RMSE</th>
-                        <th>AIC</th>
-                        <th>BIC</th>
-                        <th>Marginal R²</th>
-                        <th>Conditional R²</th>
-                        <th>Shapiro p</th>
-                    </tr>
-                    <tr>
-                        <td>{data['n_obs']}</td>
-                        <td>{data['vacc']}</td>
-                        <td><span class="badge {model_cls}">{data['model_used']}</span></td>
-                        <td>{f"{data['rmse']:.3f}" if pd.notna(data['rmse']) else "N/A"}</td>
-                        <td>{f"{data['aic']:.2f}" if pd.notna(data['aic']) else "N/A"}</td>
-                        <td>{f"{data['bic']:.2f}" if pd.notna(data['bic']) else "N/A"}</td>
-                        <td>{f"{data['r2_marg']:.3f}" if pd.notna(data['r2_marg']) else "N/A"}</td>
-                        <td>{f"{data['r2_cond']:.3f}" if pd.notna(data['r2_cond']) else "N/A"}</td>
-                        <td><span class="badge {normal_cls}">{f"{data['shapiro_p']:.4f}" if pd.notna(data['shapiro_p']) else "N/A"}</span></td>
-                    </tr>
-                </table>
-            """
-
-            if data["desc_img"]:
-                html_content += f'<h4>Descriptive Plots</h4><img class="plot-img" src="{data["desc_img"]}" alt="Descriptive Plots D{day}">'
-
-            if data["diag_img"]:
-                html_content += f'<h4>Model Diagnostics</h4><img class="plot-img" src="{data["diag_img"]}" alt="Diagnostics D{day}">'
-
-            html_content += "</div>"
-
-        html_content += "</div>"
-
-    html_content += "</div>"
-
-html_content += """
-    </div>
-
-    <script>
-        function filterTOC() {
-            var input = document.getElementById('search-input');
-            var filter = input.value.toLowerCase();
-            var groups = document.getElementsByClassName('toc-group');
-
-            for (var i = 0; i < groups.length; i++) {
-                var text = groups[i].innerText.toLowerCase();
-                if (text.includes(filter)) {
-                    groups[i].style.display = "";
-                } else {
-                    groups[i].style.display = "none";
-                }
-            }
-        }
-    </script>
-</body>
-</html>
-"""
-
-# 4. Save Final Report
-html_file_path = os.path.join(OUTPUT_ROOT, "hai_variance_report.html")
-with open(html_file_path, "w", encoding="utf-8") as f:
-    f.write(html_content)
-
-print(f"✅ HTML Report successfully built and saved to:\n   {html_file_path}")
-
-
-
-
-
-####plots needed for lab notebook
-
-### pre HAI demographics and distribution plots
-### One PNG per strain: 3 facets (distribution / age vs HAI / HAI by sex),
-### with Day plotted as different colors (shared legend) within each facet.
-### PNGs are organized into subfolders by subtype for easy cross-strain comparison.
 
 import os
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import seaborn as sns
+import re
+import glob
+import base64
+import html as html_lib
 import pandas as pd
 
-# ---- config ----
-STRAIN_COL = "Virus"
-COHORT_COL = "Cohort"
-DAY_COL = "Study Time Collected"
-DAY_UNIT_COL = "Study Time Collected Unit"
-SUBTYPE_COL = "subtype"
-AGE_COL = "Age Reported_demo"
-GENDER_COL = "Gender_demo"
-HAI_COL = "log2_HAI"
-MIN_N = 10  # per strain/day slice; days below this are dropped before plotting
+
+# ------------------------------------------------------------------
+# helpers
+# ------------------------------------------------------------------
+
+def _slugify(s):
+    s = str(s).strip()
+    s = re.sub(r"[^\w\-]+", "_", s)
+    return s
 
 
-outdir = os.path.join(SCRATCH, "final_hai_strain_facet_png")
-os.makedirs(outdir, exist_ok=True)
-
-sns.set_style("whitegrid")
+def _anchor(text):
+    return _slugify(text).lower()
 
 
-def slugify(s):
+def _img_to_base64_tag(path, max_width_px=900):
+    """Read a PNG from disk and return an <img> tag with base64-embedded data."""
+    if not path or not os.path.exists(path):
+        return "<p><em>[image not found]</em></p>"
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode("ascii")
     return (
-        str(s)
-        .replace(" ", "_")
-        .replace("/", "_")
-        .replace("—", "_")
-        .replace(":", "")
+        f'<img src="data:image/png;base64,{data}" '
+        f'style="max-width:{max_width_px}px; width:100%; height:auto; '
+        f'border:1px solid #ddd; border-radius:6px; margin:8px 0;" />'
     )
 
 
-def make_strain_facet_png(strain_df, strain, subtype, day_col, out_path):
-    """Build a 1x4 facet PNG for one strain: distribution, age vs HAI, HAI by sex, HAI by phenotype.
-    Days are colored consistently across all four panels with one shared legend.
-    """
-    days = sorted(strain_df[day_col].dropna().unique())
-    palette = dict(zip(days, sns.color_palette("tab10", n_colors=len(days))))
+def _load_csv_if_exists(path):
+    return pd.read_csv(path) if os.path.exists(path) else None
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
 
-    # --- Panel 1: HAI distribution, colored by day ---
-    # Outlined step histograms (no fill) so overlapping day-colors stay
-    # readable as distinct lines instead of blending into a solid mass.
-    sns.histplot(
-        data=strain_df,
-        x=HAI_COL,
-        hue=day_col,
-        palette=palette,
-        multiple="layer",
-        fill=False,
-        element="step",
-        linewidth=2.2,
-        bins=10,
-        ax=axes[0],
-        legend=False,
+CSS = """
+body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+       max-width: 1150px; margin: 0 auto; padding: 24px; color: #1a1a1a; line-height: 1.5; }
+h1 { border-bottom: 3px solid #4472C4; padding-bottom: 8px; }
+h2 { margin-top: 52px; border-bottom: 2px solid #ccc; padding-bottom: 6px; color: #2b4a8b; }
+h3 { margin-top: 30px; color: #333; }
+h4 { margin-top: 18px; color: #555; }
+h5 { margin-top: 10px; color: #666; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+th, td { border: 1px solid #ddd; padding: 5px 9px; text-align: left; }
+th { background: #4472C4; color: white; position: sticky; top: 0; }
+tr:nth-child(even) { background: #f7f7f9; }
+.toc { background: #f7f7f9; border: 1px solid #ddd; border-radius: 8px; padding: 16px 24px; margin-bottom: 32px; }
+.toc ul { margin: 4px 0; }
+.section-block { margin-bottom: 40px; }
+.day-block { margin: 10px 0 10px 12px; padding: 8px 0 8px 12px; border-left: 3px solid #eee; }
+.plot-block { margin: 18px 0; padding: 10px 0 10px 12px; border-left: 3px solid #e5e5e5; }
+a { color: #2b4a8b; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.back-to-top { font-size: 12px; }
+.note { color: #777; font-size: 13px; font-style: italic; }
+"""
+
+
+# ------------------------------------------------------------------
+# 1. UpSet plots
+# ------------------------------------------------------------------
+
+def _build_upset_section(output_root):
+    files = sorted(glob.glob(os.path.join(output_root, "upset_participants_by_day_*.png")))
+    if not files:
+        return "", []
+
+    toc_items = []
+    parts = ["<h2 id='upset-plots'>1. Participant / Day Overlap (UpSet plots)</h2>"]
+    for f in files:
+        strain = os.path.basename(f).replace("upset_participants_by_day_", "").replace(".png", "")
+        anchor = _anchor(f"upset-{strain}")
+        toc_items.append(f"<li><a href='#{anchor}'>{html_lib.escape(strain)}</a></li>")
+        parts.append(f"<h3 id='{anchor}'>{html_lib.escape(strain)}</h3>")
+        parts.append(_img_to_base64_tag(f, max_width_px=800))
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    return "\n".join(parts), toc_items
+
+
+# ------------------------------------------------------------------
+# 2. Faceted demographic plots
+# ------------------------------------------------------------------
+
+def _build_faceted_demo_section(output_root):
+    base_dir = os.path.join(output_root, "final_hai_strain_faceted_demo_data_png")
+    if not os.path.isdir(base_dir):
+        return "", []
+
+    subtype_dirs = sorted(
+        d for d in glob.glob(os.path.join(base_dir, "subtype_*")) if os.path.isdir(d)
     )
-    axes[0].set_title("HAI distribution")
-    axes[0].set_xlabel("log2 HAI")
-    axes[0].set_ylabel("Count")
+    if not subtype_dirs:
+        return "", []
 
-    # --- Panel 2: Age vs HAI, colored by day ---
-    sns.scatterplot(
-        data=strain_df,
-        x=AGE_COL,
-        y=HAI_COL,
-        hue=day_col,
-        palette=palette,
-        alpha=0.5,
-        ax=axes[1],
-        legend=False,
-    )
-    axes[1].set_title("Age vs HAI")
-    axes[1].set_xlabel("Age")
-    axes[1].set_ylabel("log2 HAI")
+    toc_items = []
+    parts = ["<h2 id='faceted-demo'>2. Demographic / HAI Distribution Plots</h2>"]
+    for sdir in subtype_dirs:
+        subtype = os.path.basename(sdir).replace("subtype_", "")
+        sub_anchor = _anchor(f"demo-{subtype}")
+        strain_files = sorted(glob.glob(os.path.join(sdir, "*.png")))
 
-    # --- Panel 3: HAI by sex, colored by day (grouped boxplot) ---
-    sns.boxplot(
-        data=strain_df,
-        x=GENDER_COL,
-        y=HAI_COL,
-        hue=day_col,
-        palette=palette,
-        ax=axes[2],
-    )
-    axes[2].set_title("HAI by sex")
-    axes[2].set_xlabel("Gender")
-    axes[2].set_ylabel("log2 HAI")
-    axes[2].legend_.remove()  # remove per-axis legend, add one shared legend below
-    
+        toc_items.append(
+            f"<li><a href='#{sub_anchor}'>{html_lib.escape(subtype)}</a></li>"
+        )
+
+        parts.append(f"<h3 id='{sub_anchor}'>Subtype: {html_lib.escape(subtype)}</h3>")
+        for sf in strain_files:
+            strain_name = os.path.basename(sf).replace(".png", "")
+            parts.append(f"<h4>{html_lib.escape(strain_name)}</h4>")
+            parts.append(_img_to_base64_tag(sf, max_width_px=1050))
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    return "\n".join(parts), toc_items
 
 
-    # --- shared legend for Day, placed once for the whole figure ---
-    handles = [mpatches.Patch(color=palette[d], label=f"Day {d}") for d in days]
-    fig.legend(
-        handles=handles,
-        title=day_col,
-        loc="lower center",
-        ncol=min(len(days), 8),
-        bbox_to_anchor=(0.5, -0.05),
-        frameon=False,
-    )
+# ------------------------------------------------------------------
+# 3. Phenotype value counts
+# ------------------------------------------------------------------
 
-    n_total = len(strain_df)
-    fig.suptitle(f"{strain}  (Subtype: {subtype}, N={n_total})", fontsize=14, y=1.03)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+def _build_phenotype_section(final_merge):
+    if final_merge is None or "Phenotype" not in getattr(final_merge, "columns", []):
+        return "", []
+
+    counts = final_merge["Phenotype"].value_counts().reset_index()
+    counts.columns = ["Phenotype", "Count"]
+    table_html = counts.to_html(index=False, border=0)
+
+    toc_items = ["<li><a href='#phenotype-counts'>Phenotype value counts</a></li>"]
+    parts = [
+        "<h2 id='phenotype-counts'>3. Phenotype Value Counts</h2>",
+        table_html,
+        "<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>",
+    ]
+    return "\n".join(parts), toc_items
 
 
-# ---- build one PNG per strain, grouped into subtype subfolders ----
-final_merge["_subtype_filled"] = (
-    final_merge[SUBTYPE_COL].fillna("NA") if SUBTYPE_COL in final_merge.columns else "NA"
-)
+# ------------------------------------------------------------------
+# 4. Strain-level counts
+# ------------------------------------------------------------------
 
-subtypes = sorted(final_merge["_subtype_filled"].dropna().unique())
-saved_files = []
+def _build_strain_counts_section(output_root, strain_counts_df=None):
+    df = strain_counts_df
+    if df is None:
+        df = _load_csv_if_exists(os.path.join(output_root, "strain_level_counts.csv"))
+    if df is None or len(df) == 0:
+        return "", []
 
-for subtype in subtypes:
-    subtype_df = final_merge[final_merge["_subtype_filled"] == subtype]
-    subtype_dir = os.path.join(outdir, f"subtype_{slugify(subtype)}")
-    os.makedirs(subtype_dir, exist_ok=True)
+    toc_items = ["<li><a href='#strain-counts'>Strain-level counts</a></li>"]
+    parts = [
+        "<h2 id='strain-counts'>4. Strain-Level Counts</h2>",
+        "<p class='note'>N samples / studies / cohorts / days, computed across all "
+        "days/visits for each (subtype, virus).</p>",
+        df.to_html(index=False, border=0),
+        "<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>",
+    ]
+    return "\n".join(parts), toc_items
 
-    strains = sorted(subtype_df[STRAIN_COL].dropna().unique())
 
-    for strain in strains:
-        strain_df_full = subtype_df[subtype_df[STRAIN_COL] == strain].copy()
+# ------------------------------------------------------------------
+# 5. Regression overview plots
+# ------------------------------------------------------------------
 
-        # drop days with too few samples, same as before, but keep the rest together
-        day_counts = strain_df_full[DAY_COL].value_counts()
-        valid_days = day_counts[day_counts >= MIN_N].index
-        strain_df = strain_df_full[strain_df_full[DAY_COL].isin(valid_days)]
+_OVERVIEW_PLOT_GROUPS = [
+    ("01_r2_marginal_vs_conditional_", "Marginal vs Conditional R\u00b2"),
+    ("02_r2_cohort_contribution_gap_", "Cohort Contribution to R\u00b2 (gap plot)"),
+    ("03_variance_decomposition_", "Variance Decomposition (stacked bars)"),
+    ("04_residual_variance_ranking_", "Residual Variance Ranking"),
+    ("05_stddev_vs_residual_", "Std Dev vs Residual Variance (bubble plot)"),
+    ("03_residual(relative)_vs_std_dev_", "Residual Variance (%) vs Std Dev"),
+]
 
-        if strain_df.empty:
-            print(f"Skipping {strain} (subtype {subtype}): no day group with N >= {MIN_N}")
+
+def _build_overview_plots_section(output_root):
+    found_any = False
+    toc_items = []
+    parts = ["<h2 id='overview-plots'>5. Regression Overview Plots</h2>"]
+
+    for prefix, title in _OVERVIEW_PLOT_GROUPS:
+        files = sorted(glob.glob(os.path.join(output_root, f"{prefix}*.png")))
+        if not files:
             continue
+        found_any = True
+        group_anchor = _anchor(f"overview-{prefix}")
+        toc_items.append(f"<li><a href='#{group_anchor}'>{html_lib.escape(title)}</a></li>")
+        parts.append(f"<h3 id='{group_anchor}'>{html_lib.escape(title)}</h3>")
 
-        dropped = set(strain_df_full[DAY_COL].dropna().unique()) - set(valid_days)
-        if dropped:
-            print(f"{strain}: dropping days {sorted(dropped)} (N < {MIN_N})")
+        for f in files:
+            label = os.path.basename(f).replace(prefix, "").replace(".png", "")
+            label = label.strip("_")
+            parts.append(f"<h4>{html_lib.escape(label) if label else 'All groups'}</h4>")
+            parts.append(_img_to_base64_tag(f, max_width_px=1050))
 
-        fname = f"{slugify(strain)}.png"
-        out_path = os.path.join(subtype_dir, fname)
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
 
-        make_strain_facet_png(strain_df, strain, subtype, DAY_COL, out_path)
-        saved_files.append(out_path)
-        print(f"Saved: {out_path}")
-
-print(f"\nDone. {len(saved_files)} PNGs saved under {outdir}")
-
+    if not found_any:
+        return "", []
+    return "\n".join(parts), toc_items
 
 
-#table of  phenotype value counts
+# ------------------------------------------------------------------
+# 6. Regression coefficients
+# ------------------------------------------------------------------
 
-final_merge["Phenotype"].value_counts()
+def _fit_coef_table(fit):
+    """Pull term/estimate/SE/p-value/CI out of a statsmodels fit object."""
+    try:
+        params = fit.params
+        bse = fit.bse
+        pvals = fit.pvalues
+        terms = list(params.index)
+
+        rows = {
+            "Term": terms,
+            "Estimate": [round(float(v), 4) for v in params.values],
+            "Std Error": [round(float(v), 4) for v in bse.values],
+            "p-value": [round(float(v), 4) for v in pvals.values],
+        }
+
+        try:
+            conf = fit.conf_int()
+            conf = conf.values if hasattr(conf, "values") else conf
+            rows["CI Lower"] = [round(float(v), 4) for v in conf[:, 0]]
+            rows["CI Upper"] = [round(float(v), 4) for v in conf[:, 1]]
+        except Exception:
+            pass
+
+        df = pd.DataFrame(rows)
+        df["Sig."] = df["p-value"].apply(
+            lambda p: "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+        )
+        return df
+    except Exception:
+        return None
+
+
+def _build_regression_results_section_from_fits(lmm_results, ols_results, vacc_label):
+    """Preferred path: build coefficient tables directly from the fit objects
+    (includes cohort/residual variance rows for LMMs)."""
+    if not lmm_results and not ols_results:
+        return None
+
+    all_fits = [(key, f, "LMM") for key, f in (lmm_results or {}).items()] + \
+               [(key, f, "OLS") for key, f in (ols_results or {}).items()]
+    if not all_fits:
+        return None
+
+    by_subtype = {}
+    for (subtype_name, virus_name, day_val), fit, model_type in all_fits:
+        by_subtype.setdefault(subtype_name, []).append(
+            (virus_name, day_val, fit, model_type)
+        )
+
+    toc_items = []
+    parts = ["<h2 id='regression-results'>6. Regression Results (Coefficients)</h2>"]
+
+    for subtype_name in sorted(by_subtype.keys(), key=str):
+        sub_anchor = _anchor(f"coef-{subtype_name}")
+        toc_items.append(f"<li><a href='#{sub_anchor}'>{html_lib.escape(str(subtype_name))}</a></li>")
+        parts.append(f"<h3 id='{sub_anchor}'>Subtype: {html_lib.escape(str(subtype_name))}</h3>")
+
+        entries = sorted(by_subtype[subtype_name], key=lambda e: (str(e[0]), e[1], e[3]))
+        for virus_name, day_val, fit, model_type in entries:
+            vacc_status = (vacc_label or {}).get((subtype_name, virus_name, day_val), "Unknown")
+            coef_df = _fit_coef_table(fit)
+
+            parts.append(
+                f"<div class='day-block'><b>{html_lib.escape(str(virus_name))} &mdash; "
+                f"Day {day_val} &mdash; {html_lib.escape(str(vacc_status))} &mdash; {model_type}</b>"
+            )
+            if coef_df is not None:
+                parts.append(coef_df.to_html(index=False, border=0))
+            else:
+                parts.append("<p><em>[could not extract coefficient table for this fit]</em></p>")
+            parts.append("</div>")
+
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    return "\n".join(parts), toc_items
+
+
+def _build_regression_results_section_from_csv(output_root):
+    """Fallback path: read hai_regression_summary.csv (Subtype/Virus/Day/
+    Vaccinated/Model/Term/Estimate/CI_low/CI_high/p_value) if fit objects
+    aren't available in memory."""
+    df = _load_csv_if_exists(os.path.join(output_root, "hai_regression_summary.csv"))
+    if df is None or len(df) == 0:
+        return "", []
+
+    toc_items = []
+    parts = ["<h2 id='regression-results'>6. Regression Results (Coefficients)</h2>"]
+
+    for subtype_name, sdf in df.groupby("Subtype"):
+        sub_anchor = _anchor(f"coef-{subtype_name}")
+        toc_items.append(f"<li><a href='#{sub_anchor}'>{html_lib.escape(str(subtype_name))}</a></li>")
+        parts.append(f"<h3 id='{sub_anchor}'>Subtype: {html_lib.escape(str(subtype_name))}</h3>")
+
+        for (virus_name, day_val, vacc_status, model_type), gdf in sdf.groupby(
+            ["Virus", "Day", "Vaccinated", "Model"]
+        ):
+            parts.append(
+                f"<div class='day-block'><b>{html_lib.escape(str(virus_name))} &mdash; "
+                f"Day {day_val} &mdash; {html_lib.escape(str(vacc_status))} &mdash; {model_type}</b>"
+            )
+            cols = [c for c in ["Term", "Estimate", "CI_low", "CI_high", "p_value"] if c in gdf.columns]
+            parts.append(gdf[cols].to_html(index=False, border=0))
+            parts.append("</div>")
+
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    return "\n".join(parts), toc_items
+
+
+def _build_regression_results_section(output_root, lmm_results, ols_results, vacc_label):
+    result = _build_regression_results_section_from_fits(lmm_results, ols_results, vacc_label)
+    if result is not None:
+        return result
+    return _build_regression_results_section_from_csv(output_root)
+
+
+# ------------------------------------------------------------------
+# 7. Model choice log
+# ------------------------------------------------------------------
+
+def _build_model_choice_section(output_root, choice_df_in=None):
+    df = choice_df_in
+    if df is None:
+        df = _load_csv_if_exists(os.path.join(output_root, "hai_model_choice_log.csv"))
+    if df is None or len(df) == 0:
+        return "", []
+
+    toc_items = ["<li><a href='#model-choice'>Model choice log</a></li>"]
+    parts = [
+        "<h2 id='model-choice'>7. Model Choice Log</h2>",
+        "<p class='note'>Which model (LMM vs OLS) was fit for each subtype/strain/day, "
+        "or why a group was skipped (N &lt; 20).</p>",
+        df.to_html(index=False, border=0),
+        "<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>",
+    ]
+    return "\n".join(parts), toc_items
+
+
+# ------------------------------------------------------------------
+# 8. Variance decomposition table
+# ------------------------------------------------------------------
+
+def _build_variance_decomposition_table_section(output_root, vdf_in=None):
+    df = vdf_in
+    if df is None:
+        df = _load_csv_if_exists(os.path.join(output_root, "variance_decomposition_table.csv"))
+    if df is None or len(df) == 0:
+        return "", []
+
+    preferred_cols = [
+        "Subtype", "Virus", "Day", "Vaccinated",
+        "Cohort_Variance", "Residual_Variance", "Total_Variance",
+        "Cohort_Variance_pct", "Residual_Variance_pct",
+        "Std_HAI_log2", "N_Participants", "N_Samples", "N_Studies", "N_Cohorts", "N_Days",
+    ]
+    cols = [c for c in preferred_cols if c in df.columns] + \
+           [c for c in df.columns if c not in preferred_cols and c not in ("Group_short", "Group_label_full")]
+
+    toc_items = ["<li><a href='#variance-table'>Variance decomposition table</a></li>"]
+    parts = [
+        "<h2 id='variance-table'>8. Variance Decomposition Table</h2>",
+        df[cols].to_html(index=False, border=0),
+        "<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>",
+    ]
+    return "\n".join(parts), toc_items
+
+
+# ------------------------------------------------------------------
+# 9. Descriptive plots by subtype -> strain -> day
+# ------------------------------------------------------------------
+
+def _build_descriptive_plots_section(output_root):
+    base_dir = os.path.join(output_root, "descriptive_by_subtype_strain_day")
+    if not os.path.isdir(base_dir):
+        return "", []
+
+    plot_files = sorted(glob.glob(os.path.join(base_dir, "*", "*", "*", "summary_plots.png")))
+    if not plot_files:
+        return "", []
+
+    toc_items = []
+    parts = ["<h2 id='descriptive-plots'>9. Descriptive Plots by Subtype &rarr; Strain &rarr; Day</h2>"]
+
+    by_subtype = {}
+    for f in plot_files:
+        day_dir = os.path.dirname(f)
+        virus_dir = os.path.dirname(day_dir)
+        subtype_dir = os.path.dirname(virus_dir)
+        subtype = os.path.basename(subtype_dir)
+        virus = os.path.basename(virus_dir)
+        day_label = os.path.basename(day_dir)
+        by_subtype.setdefault(subtype, {}).setdefault(virus, []).append((day_label, f))
+
+    for subtype in sorted(by_subtype.keys()):
+        sub_anchor = _anchor(f"desc-{subtype}")
+        toc_items.append(f"<li><a href='#{sub_anchor}'>{html_lib.escape(subtype)}</a></li>")
+        parts.append(f"<h3 id='{sub_anchor}'>Subtype: {html_lib.escape(subtype)}</h3>")
+
+        for virus in sorted(by_subtype[subtype].keys()):
+            parts.append(f"<h4>{html_lib.escape(virus)}</h4>")
+            for day_label, fpath in sorted(by_subtype[subtype][virus]):
+                stats_path = os.path.join(os.path.dirname(fpath), "summary_stats.csv")
+                parts.append(f"<div class='plot-block'><h5>{html_lib.escape(day_label)}</h5>")
+                parts.append(_img_to_base64_tag(fpath, max_width_px=900))
+                if os.path.exists(stats_path):
+                    stats_df = pd.read_csv(stats_path)
+                    stats_df.columns = ["Statistic", "log2_HAI"] if len(stats_df.columns) == 2 else stats_df.columns
+                    parts.append(stats_df.to_html(index=False, border=0))
+                parts.append("</div>")
+
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    return "\n".join(parts), toc_items
+
+
+# ------------------------------------------------------------------
+# 10. Model performance & diagnostics
+# ------------------------------------------------------------------
+
+def _build_diagnostics_section(perf_df, diag_dir):
+    if perf_df is None or len(perf_df) == 0:
+        return "", []
+
+    toc_items = []
+    parts = ["<h2 id='diagnostics'>10. Model Performance &amp; Diagnostics</h2>"]
+
+    summary_cols = [c for c in perf_df.columns if c != "Diagnostic_Plot"]
+    parts.append("<h3>Full performance summary table</h3>")
+    parts.append(perf_df[summary_cols].to_html(index=False, border=0))
+    parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    for subtype, sdf in perf_df.groupby("Subtype"):
+        sub_anchor = _anchor(f"diag-{subtype}")
+        toc_items.append(f"<li><a href='#{sub_anchor}'>{html_lib.escape(str(subtype))}</a></li>")
+        parts.append(f"<h3 id='{sub_anchor}'>Subtype: {html_lib.escape(str(subtype))}</h3>")
+
+        for virus, vdf_g in sdf.groupby("Virus"):
+            parts.append(f"<h4>{html_lib.escape(str(virus))}</h4>")
+
+            for _, row in vdf_g.sort_values(["Day", "Vaccinated", "Model"]).iterrows():
+                parts.append(
+                    f"<div class='day-block'><b>Day {row['Day']} &mdash; "
+                    f"{html_lib.escape(str(row['Vaccinated']))} &mdash; {row['Model']}</b><br>"
+                    f"N={row['N_Obs']}, AIC={row['AIC']}, BIC={row['BIC']}, "
+                    f"RMSE={row['RMSE']}, Marginal R&sup2;={row['Marginal_R2']}, "
+                    f"Conditional R&sup2;={row['Conditional_R2']}, "
+                    f"Shapiro p={row['Shapiro_p']}"
+                    f"</div>"
+                )
+                parts.append(_img_to_base64_tag(row.get("Diagnostic_Plot"), max_width_px=950))
+
+        parts.append("<p class='back-to-top'><a href='#toc'>&uarr; back to top</a></p>")
+
+    return "\n".join(parts), toc_items
+
+
+# ------------------------------------------------------------------
+# main entry point
+# ------------------------------------------------------------------
+
+def generate_master_html_report(
+    output_root=None,
+    diag_dir=None,
+    final_merge_df=None,
+    perf_df_in=None,
+    lmm_results_in=None,
+    ols_results_in=None,
+    vacc_label_in=None,
+    choice_df_in=None,
+    vdf_in=None,
+    strain_counts_in=None,
+    out_filename="master_report.html",
+):
+    """
+    Build one self-contained HTML page combining every plot/table the
+    pipeline produced. Anything not passed explicitly is pulled from the
+    current global namespace (OUTPUT_ROOT, DIAG_DIR, final_merge, perf_df,
+    lmm_results, ols_results, vacc_label, choice_df, vdf, strain_counts),
+    or re-loaded from the CSVs the pipeline already writes to OUTPUT_ROOT.
+    """
+    g = globals()
+    output_root = output_root or g.get("OUTPUT_ROOT")
+    diag_dir = diag_dir or g.get("DIAG_DIR")
+    final_merge_df = final_merge_df if final_merge_df is not None else g.get("final_merge")
+    perf_df_in = perf_df_in if perf_df_in is not None else g.get("perf_df")
+    lmm_results_in = lmm_results_in if lmm_results_in is not None else g.get("lmm_results")
+    ols_results_in = ols_results_in if ols_results_in is not None else g.get("ols_results")
+    vacc_label_in = vacc_label_in if vacc_label_in is not None else g.get("vacc_label")
+    choice_df_in = choice_df_in if choice_df_in is not None else g.get("choice_df")
+    vdf_in = vdf_in if vdf_in is not None else g.get("vdf")
+    strain_counts_in = strain_counts_in if strain_counts_in is not None else g.get("strain_counts")
+
+    if output_root is None:
+        raise ValueError("output_root not found -- pass it explicitly (e.g. OUTPUT_ROOT).")
+
+    if perf_df_in is None:
+        csv_path = os.path.join(output_root, "model_performance_summary_by_subtype.csv")
+        if os.path.exists(csv_path):
+            perf_df_in = pd.read_csv(csv_path)
+
+    upset_html, upset_toc = _build_upset_section(output_root)
+    demo_html, demo_toc = _build_faceted_demo_section(output_root)
+    pheno_html, pheno_toc = _build_phenotype_section(final_merge_df)
+    strain_counts_html, strain_counts_toc = _build_strain_counts_section(output_root, strain_counts_in)
+    overview_html, overview_toc = _build_overview_plots_section(output_root)
+    coef_html, coef_toc = _build_regression_results_section(
+        output_root, lmm_results_in, ols_results_in, vacc_label_in
+    )
+    choice_html, choice_toc = _build_model_choice_section(output_root, choice_df_in)
+    vartable_html, vartable_toc = _build_variance_decomposition_table_section(output_root, vdf_in)
+    desc_html, desc_toc = _build_descriptive_plots_section(output_root)
+    diag_html, diag_toc = _build_diagnostics_section(perf_df_in, diag_dir)
+
+    toc_html = f"""
+    <div class="toc" id="toc">
+      <h2 style="margin-top:0;">Table of Contents</h2>
+      <ol>
+        <li><a href="#upset-plots">Participant / Day Overlap (UpSet plots)</a><ul>{''.join(upset_toc)}</ul></li>
+        <li><a href="#faceted-demo">Demographic / HAI Distribution Plots</a><ul>{''.join(demo_toc)}</ul></li>
+        <li><a href="#phenotype-counts">Phenotype Value Counts</a></li>
+        <li><a href="#strain-counts">Strain-Level Counts</a></li>
+        <li><a href="#overview-plots">Regression Overview Plots</a><ul>{''.join(overview_toc)}</ul></li>
+        <li><a href="#regression-results">Regression Results (Coefficients)</a><ul>{''.join(coef_toc)}</ul></li>
+        <li><a href="#model-choice">Model Choice Log</a></li>
+        <li><a href="#variance-table">Variance Decomposition Table</a></li>
+        <li><a href="#descriptive-plots">Descriptive Plots by Subtype &rarr; Strain &rarr; Day</a><ul>{''.join(desc_toc)}</ul></li>
+        <li><a href="#diagnostics">Model Performance &amp; Diagnostics</a><ul>{''.join(diag_toc)}</ul></li>
+      </ol>
+    </div>
+    """
+
+    full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HAI Pipeline -- Master Report</title>
+<style>{CSS}</style>
+</head>
+<body>
+<h1>HAI Pipeline &mdash; Master Report</h1>
+<p><em>Auto-generated report combining all pipeline outputs.</em></p>
+{toc_html}
+{upset_html}
+{demo_html}
+{pheno_html}
+{strain_counts_html}
+{overview_html}
+{coef_html}
+{choice_html}
+{vartable_html}
+{desc_html}
+{diag_html}
+</body>
+</html>"""
+
+    out_path = os.path.join(output_root, out_filename)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(full_html)
+
+    print(f"Master HTML report written to: {out_path}")
+    return out_path
+
+
+if __name__ == "__main__":
+    generate_master_html_report()
+
+
+
+
+
+
+
 
 
 
@@ -1960,14 +2100,14 @@ post_df = final_merge[(final_merge['Virus'].isin(strain_list)) &
 
 #h1n1
 h1n1 = post_df[post_df['Virus'].isin(['A/California/7/2009', 'A/Solomon Islands/3/2006'])]
-solomon = h1n1[h1n1['Cohort for regression'] == 'Older participants aged 60 to 89 years, vaccinated with Fluzone']
-cali = h1n1[h1n1['Cohort for regression'] == '150 healthy adults, 50-74 yo']
+solomon = h1n1[(h1n1["Virus"] == 'A/Solomon Islands/3/2006') & (h1n1['Cohort for regression'] == 'Older participants aged 60 to 89 years, vaccinated with Fluzone')]
+cali = h1n1[(h1n1["Virus"] == 'A/California/7/2009') &   (h1n1['Cohort for regression'] == '150 healthy adults, 50-74 yo')]
 
 
 #h3n2
 h3n2 = post_df[(post_df['Virus'].isin(['A/Perth/16/2009', 'A/Victoria/361/2011']))]
 perth = h3n2[(h3n2['Virus'] == 'A/Perth/16/2009') & (h3n2['Cohort for regression'] == '150 healthy adults, 50-74 yo')]
-vic= h3n2[(h3n2['Virus'] == 'A/Victoria/361/2011') & (h3n2['Cohort for regression'] == 'Healthy Adults 2012 - 2013')]
+vic = h3n2[(h3n2['Virus'] == 'A/Victoria/361/2011') & (h3n2['Cohort for regression'] == 'Healthy Adults 2012 - 2013')]
 
 
 #victoria
@@ -1998,6 +2138,80 @@ rep_df = pd.concat(replication_df_list, ignore_index=True)
 
 
 
+OUTPUT_ROOT2 = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/immunespace_replication_hai_regression_results"
+os.makedirs(OUTPUT_ROOT2, exist_ok=True)
+
+#
+"""
+UpSet plots: Participants x Days, computed separately per strain.
+
+Sets     = Study Time Collected (Day 0, Day 28, ...)
+Elements = participants (new_participant_id)
+Split by = strain (subtype, or Virus for finer granularity)
+
+For each strain, this shows how many participants were sampled at each day,
+and which combinations of days each participant was sampled at -- so you can
+compare e.g. "H1N1 day-overlap" vs "H3N2 day-overlap".
+
+
+"""
+
+import pandas as pd
+from upsetplot import from_memberships, UpSet
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------------
+# Load your data here. Replace this with your actual source (csv, etc.)
+
+
+# df = pd.read_csv("your_file.csv")
+# ------------------------------------------------------------------
+df2 = rep_df.copy()  # assumes `df` is already the dataframe shown in your message
+
+# use `subtype` (H1N1/H3N2/Yamagata/...) for the strain grouping.
+# swap to "Virus" instead if you want individual reference-strain granularity
+# (e.g. A/South Dakota/06/2007 vs A/Uruguay/716/2007) rather than subtype.
+strain_col = "Virus"
+
+# one row per (participant, day, strain), regardless of everything else
+part_day_strain = (
+    df2[["Participant ID_merge1", "Study Time Collected", strain_col]]
+    .dropna(subset=["Study Time Collected", strain_col])
+    .drop_duplicates()
+)
+
+strains = sorted(part_day_strain[strain_col].unique())
+
+for strain in strains:
+    subset = part_day_strain[part_day_strain[strain_col] == strain]
+
+    # for each participant, which set of days were they sampled at for this strain?
+    memberships = (
+        subset.groupby("Participant ID_merge1")["Study Time Collected"]
+        .apply(lambda s: [f"Day {int(d)}" for d in sorted(s.unique())])
+        .tolist()
+    )
+
+    upset_data = from_memberships(memberships)
+
+    fig = plt.figure(figsize=(10, 6))
+    UpSet(
+        upset_data,
+        subset_size="count",
+        show_counts=True,
+        sort_by="cardinality",
+    ).plot(fig=fig)
+    plt.suptitle(f"Participant overlap across collection days -- {strain}")
+
+    safe_name = str(strain).replace("/", "-").replace(" ", "_")
+    plt.savefig(OUTPUT_ROOT2 + f"/replication_upset_participants_by_day_{safe_name}.png",
+        dpi=150,
+        bbox_inches="tight",
+    )
+
+plt.show()
+
+
 
 """
 HAI regression + variance analysis, organized by Subtype -> Strain -> Day
@@ -2022,19 +2236,18 @@ script).
 
 
 
-OUTPUT_ROOT = "/Users/jwillis/minerva_scratch/projects/HAI/2026-05-20_HAI_covariate_regression/replication_hai_regression_results"
-os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
 
 # ---------------------------------------------------------------
 # 1. LOAD + CLEAN (same as original)
 # ---------------------------------------------------------------
-df = rep_df.copy()
-df.columns = df.columns.str.strip()
+df2 = rep_df.copy()
+df2.columns = df2.columns.str.strip()
 
 COLUMNS = {
     "outcome": "log2_HAI",
-    "age": "Age Reported_demo",
-    "sex": "Gender_demo",
+    "age": "Age Reported_hai",
+    "sex": "Gender_hai",
     "cohort": "Cohort for regression",
     "virus": "Virus",
     "subtype": "subtype",
@@ -2043,7 +2256,7 @@ COLUMNS = {
     "day": "Study Time Collected",
 }
 
-clean = df.rename(columns={
+clean = df2.rename(columns={
     COLUMNS["outcome"]: "log2_HAI",
     COLUMNS["age"]: "age",
     COLUMNS["sex"]: "sex",
@@ -2069,8 +2282,8 @@ clean["age"] = pd.to_numeric(clean["age"], errors="coerce")
 clean["day"] = pd.to_numeric(clean["day"], errors="coerce")
 clean = clean.dropna(subset=["age", "day"])
 
-if "Study Time Collected Unit" in df.columns:
-    bad_units = df.loc[clean.index, "Study Time Collected Unit"].dropna().unique()
+if "Study Time Collected Unit" in df2.columns:
+    bad_units = df2.loc[clean.index, "Study Time Collected Unit"].dropna().unique()
     bad_units = [u for u in bad_units if str(u).strip().lower() != "days"]
     if bad_units:
         raise ValueError(
@@ -2112,7 +2325,7 @@ strain_counts = (
     )
     .reset_index()
 )
-strain_counts.to_csv(os.path.join(OUTPUT_ROOT, "replication_strain_level_counts.csv"), index=False)
+strain_counts.to_csv(os.path.join(OUTPUT_ROOT2, "replication_strain_level_counts.csv"), index=False)
 print("Strain-level counts (samples / studies / cohorts):")
 print(strain_counts.to_string(index=False))
 
@@ -2181,7 +2394,7 @@ for (subtype_name, virus_name, day_val), fit in ols_results.items():
     })
 
 summary_df = pd.DataFrame(rows)
-summary_df.to_csv(os.path.join(OUTPUT_ROOT, "replication_hai_regression_summary.csv"), index=False)
+summary_df.to_csv(os.path.join(OUTPUT_ROOT2, "replication_hai_regression_summary.csv"), index=False)
 
 # ---------------------------------------------------------------
 # 5. MODEL CHOICE LOG
@@ -2205,7 +2418,7 @@ for (subtype_name, virus_name, day_val), sub in clean.groupby(["subtype", "virus
     })
 
 choice_df = pd.DataFrame(choice_rows)
-choice_df.to_csv(os.path.join(OUTPUT_ROOT, "replication_hai_model_choice_log.csv"), index=False)
+choice_df.to_csv(os.path.join(OUTPUT_ROOT2, "replication_hai_model_choice_log.csv"), index=False)
 
 # ---------------------------------------------------------------
 # 6. VARIANCE / EXPLAINED-VARIANCE TABLE (OLS only)
@@ -2249,7 +2462,7 @@ vdf["Group_label_full"] = vdf.apply(
     axis=1
 )
 
-vdf.to_csv(os.path.join(OUTPUT_ROOT, "replication_variance_decomposition_table.csv"), index=False)
+vdf.to_csv(os.path.join(OUTPUT_ROOT2, "replication_variance_decomposition_table.csv"), index=False)
 
 overview_plot_paths = []
 
@@ -2321,7 +2534,7 @@ for subtype in sorted(df_plot["Subtype"].dropna().unique()):
     plt.tight_layout()
 
     outfile = os.path.join(
-        OUTPUT_ROOT,
+        OUTPUT_ROOT2,
         f"01_replication_r2_{subtype.replace('/', '_').replace(' ', '_')}.png",
     )
     fig.savefig(outfile, dpi=300, bbox_inches="tight")
@@ -2382,7 +2595,7 @@ for subtype in sorted(vdf["Subtype"].dropna().unique()):
     plt.tight_layout()
 
     outfile = os.path.join(
-        OUTPUT_ROOT,
+        OUTPUT_ROOT2,
         f"02_replication_residual_unexplained_{safe_name(subtype)}.png",
     )
     fig.savefig(outfile, dpi=300, bbox_inches="tight")
@@ -2441,7 +2654,7 @@ for subtype in sorted(vdf["Subtype"].unique()):
     plt.tight_layout()
 
     outfile = os.path.join(
-        OUTPUT_ROOT,
+        OUTPUT_ROOT2,
         f"03_replication_variance_split_{safe_name(subtype)}.png",
     )
     fig.savefig(outfile, dpi=300, bbox_inches="tight")
@@ -2499,7 +2712,7 @@ for subtype in sorted(vdf["Subtype"].unique()):
     plt.tight_layout()
 
     outfile = os.path.join(
-        OUTPUT_ROOT,
+        OUTPUT_ROOT2,
         f"04_replication_residual_unexplained_ranking_{safe_name(subtype)}.png",
     )
     fig.savefig(outfile, dpi=300, bbox_inches="tight")
@@ -2628,13 +2841,13 @@ def plot_std_vs_unexplained(sub_vdf, title, out_path):
     print(f"Saved: {out_path}")
 
 
-p5 = os.path.join(OUTPUT_ROOT, "05_replication_stddev_vs_unexplained_all.png")
+p5 = os.path.join(OUTPUT_ROOT2, "05_replication_stddev_vs_unexplained_all.png")
 plot_std_vs_unexplained(vdf, "Std Dev vs Unexplained Variance (color=strain, shape=day, size=N)", p5)
 overview_plot_paths.append(("Std Dev vs Unexplained Variance — All Subtypes", p5))
 
 for st in vdf["Subtype"].unique():
     sub = vdf[vdf["Subtype"] == st]
-    p_st = os.path.join(OUTPUT_ROOT, f"05_replication_stddev_vs_unexplained_{safe_name(st)}.png")
+    p_st = os.path.join(OUTPUT_ROOT2, f"05_replication_stddev_vs_unexplained_{safe_name(st)}.png")
     plot_std_vs_unexplained(sub, f"Std Dev vs Unexplained Variance — Subtype {st}", p_st)
     overview_plot_paths.append((f"Std Dev vs Unexplained Variance — Subtype {st}", p_st))
 
@@ -2645,7 +2858,7 @@ for st in vdf["Subtype"].unique():
 # 8. DESCRIPTIVE PLOTS per (subtype, virus, day), saved into a
 #    subtype/strain/day folder tree
 # =================================================================
-BASE_DESC_DIR = os.path.join(OUTPUT_ROOT, "replication_descriptive_by_subtype_strain_day")
+BASE_DESC_DIR = os.path.join(OUTPUT_ROOT2, "replication_descriptive_by_subtype_strain_day")
 os.makedirs(BASE_DESC_DIR, exist_ok=True)
 
 
@@ -2841,7 +3054,7 @@ for subtype in plot_groups:
     plt.tight_layout()
 
     outfile = os.path.join(
-        OUTPUT_ROOT,
+        OUTPUT_ROOT2,
         f"03_replication_residual(relative)_vs_std_dev_{safe_name(subtype_file)}.png"
     )
     fig.savefig(outfile, dpi=300, bbox_inches="tight")
@@ -2864,45 +3077,65 @@ from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.stattools import durbin_watson
 from statsmodels.stats.outliers_influence import OLSInfluence
 
-BASE_DIAG_DIR = os.path.join(OUTPUT_ROOT, "replication_diagnostics_by_subtype_strain_day")
+BASE_DIAG_DIR = os.path.join(OUTPUT_ROOT2, "replication_diagnostics_by_subtype_strain_day")
 os.makedirs(BASE_DIAG_DIR, exist_ok=True)
 
 diag_rows = []
 
-def plot_ols_diagnostics(fit, sub, label, out_dir):
-    resid = fit.resid
-    fitted = fit.fittedvalues
-    influence = OLSInfluence(fit)
-    std_resid = influence.resid_studentized_internal
-    leverage = influence.hat_matrix_diag
-    cooks_d = influence.cooks_distance[0]
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+def plot_ols_diagnostics(fit, sub, label, out_dir):
+    resid = np.asarray(fit.resid)
+    fitted = np.asarray(fit.fittedvalues)
+    std_resid = (resid - resid.mean()) / resid.std(ddof=1)
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
 
     # 1. Residuals vs Fitted
-    axes[0, 0].scatter(fitted, resid, alpha=0.5, color="#4472C4", edgecolor="black", linewidth=0.3)
-    axes[0, 0].axhline(0, color="red", ls="--", lw=1)
-    axes[0, 0].set_xlabel("Fitted values")
-    axes[0, 0].set_ylabel("Residuals")
-    axes[0, 0].set_title("Residuals vs Fitted")
-    # lowess trend line if enough points
-    if len(fitted) >= 10:
-        try:
-            from statsmodels.nonparametric.smoothers_lowess import lowess
-            sm_fit = lowess(resid, fitted, frac=0.6)
-            axes[0, 0].plot(sm_fit[:, 0], sm_fit[:, 1], color="orange", lw=1.5)
-        except Exception:
-            pass
+    ax = axes[0, 0]
+    ax.scatter(fitted, resid, alpha=0.5, edgecolor="black", linewidth=0.3)
+    ax.axhline(0, color="red", linestyle="--", linewidth=1)
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess as _lowess
+        sm_line = _lowess(resid, fitted, frac=0.6)
+        ax.plot(sm_line[:, 0], sm_line[:, 1], color="blue", linewidth=1.5)
+    except Exception:
+        pass
+    ax.set_xlabel("Fitted values")
+    ax.set_ylabel("Residuals")
+    ax.set_title("Residuals vs Fitted")
+    ax.grid(alpha=0.3)
 
-    # 2. QQ plot of standardized residuals
-    (osm, osr), (slope, intercept, r) = stats.probplot(std_resid, dist="norm")
-    axes[0, 1].scatter(osm, osr, alpha=0.6, color="#ED7D31", edgecolor="black", linewidth=0.3)
-    axes[0, 1].plot(osm, slope * osm + intercept, color="red", lw=1.5)
-    axes[0, 1].set_xlabel("Theoretical quantiles")
-    axes[0, 1].set_ylabel("Standardized residuals")
-    axes[0, 1].set_title("Normal Q-Q")
+    # 2. Normal Q-Q
+    ax = axes[0, 1]
+    stats.probplot(std_resid, dist="norm", plot=ax)
+    ax.set_title("Normal Q-Q")
+    ax.grid(alpha=0.3)
 
-    fig.suptitle(label, fontsize=11)
+    # 3. Scale-Location
+    ax = axes[1, 0]
+    sqrt_abs_std_resid = np.sqrt(np.abs(std_resid))
+    ax.scatter(fitted, sqrt_abs_std_resid, alpha=0.5, edgecolor="black", linewidth=0.3)
+    try:
+        sm_line2 = _lowess(sqrt_abs_std_resid, fitted, frac=0.6)
+        ax.plot(sm_line2[:, 0], sm_line2[:, 1], color="blue", linewidth=1.5)
+    except Exception:
+        pass
+    ax.set_xlabel("Fitted values")
+    ax.set_ylabel("sqrt(|Standardized Residuals|)")
+    ax.set_title("Scale-Location")
+    ax.grid(alpha=0.3)
+
+    # 4. Residual Distribution (density)
+    ax = axes[1, 1]
+    ax.hist(resid, bins=15, density=True, alpha=0.7, color="#4472C4", edgecolor="black")
+    xs = np.linspace(resid.min(), resid.max(), 200)
+    ax.plot(xs, stats.norm.pdf(xs, resid.mean(), resid.std(ddof=1)), color="red", linewidth=2)
+    ax.set_xlabel("Residuals")
+    ax.set_ylabel("Density")
+    ax.set_title("Residual Distribution")
+    ax.grid(alpha=0.3)
+
+    fig.suptitle(label, fontsize=11, fontweight="bold")
     plt.tight_layout()
 
     os.makedirs(out_dir, exist_ok=True)
@@ -2910,7 +3143,6 @@ def plot_ols_diagnostics(fit, sub, label, out_dir):
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return fig_path
-
 
 for (subtype_name, virus_name, day_val), fit in ols_results.items():
     sub = clean[
@@ -2926,7 +3158,7 @@ for (subtype_name, virus_name, day_val), fit in ols_results.items():
         BASE_DIAG_DIR, safe_name(subtype_name), safe_name(virus_name),
         f"Day{int(day_val)}__{safe_name(vacc_status)}",
     )
-    fig_path = plot_ols_diagnostics(fit, sub, label, out_dir)
+    fig_path = plot_ols_diagnostics(fit, sub, label, out_dir)  # unchanged call
 
     # --- normality of residuals ---
     shapiro_stat, shapiro_p = stats.shapiro(fit.resid) if n_obs <= 5000 else (np.nan, np.nan)
@@ -2965,246 +3197,430 @@ for (subtype_name, virus_name, day_val), fit in ols_results.items():
     print(f"Saved diagnostics: {fig_path}")
 
 diag_df = pd.DataFrame(diag_rows)
-diag_df.to_csv(os.path.join(OUTPUT_ROOT, "replication_regression_diagnostics_summary.csv"), index=False)
+diag_df.to_csv(os.path.join(OUTPUT_ROOT2, "replication_regression_diagnostics_summary.csv"), index=False)
 print("\nDiagnostics summary:")
 print(diag_df.drop(columns=["Diagnostic_Plot_Path"]).to_string(index=False))
 
-# %%
-# ---------------------------------------------------------------
-# 9. BUILD SELF-CONTAINED HTML REPORT
-#    Organized: Overview -> Subtype -> Strain -> Day
-#    All images embedded as base64 so the report is a single
-#    portable file with no dependency on relative image paths.
-# ---------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+"""
+================================================================================
+SECTION 9. BUILD ONE SELF-CONTAINED HTML REPORT
+================================================================================
+Appends to the script above. Assumes the following already exist in memory
+from the code you pasted:
+
+    OUTPUT_ROOT2        - output directory
+    strain_counts       - per-strain annotation counts (df)
+    choice_df           - model choice log (df)
+    summary_df          - regression summary (df)
+    vdf                 - variance decomposition table (df)
+    diag_df             - regression diagnostics summary (df)
+    overview_plot_paths - list of (title, path) tuples, built during section 7
+    desc_plot_paths     - dict {(subtype, virus, day): path}, built in section 8
+    safe_name(s)        - helper already defined above
+
+This section only ADDS to that state -- it does not redefine or recompute
+anything already produced above. Images are embedded as base64 so the report
+is a single file you can open/share without the folder of PNGs alongside it.
+
+Run this after the rest of the script has completed.
+"""
+
+import os
+import re
 import base64
+import html as html_lib
 from datetime import datetime
 
-def img_to_b64(path):
+REPORT_PATH2 = os.path.join(OUTPUT_ROOT2, "replication_hai_report.html")
+
+
+# ---------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------
+def safe_name2(s):
+    """Local copy, independent of any global `safe_name` that may have been
+    overwritten (e.g. accidentally reassigned to a string) earlier in the
+    notebook session."""
+    s = str(s).strip()
+    s = re.sub(r'[\\/*?:"<>|]', "_", s)
+    s = re.sub(r'\s+', "_", s)
+    return s
+
+
+def img_to_b642(path):
+    """Read a PNG from disk and return a data: URI, or None if missing."""
     if not path or not os.path.exists(path):
         return None
     with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+        data = f.read()
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
-def img_tag(path, alt="", max_width="100%"):
-    b64 = img_to_b64(path)
+
+def esc2(x):
+    return html_lib.escape(str(x))
+
+
+def df_to_html_table2(df, table_id=None, max_rows=None):
+    """Render a dataframe as a styled HTML table (no external deps)."""
+    if df is None or len(df) == 0:
+        return "<p><em>No data.</em></p>"
+    d = df.copy()
+    if max_rows is not None and len(d) > max_rows:
+        d = d.head(max_rows)
+        truncated_note = (
+            f"<p class='note'>Showing first {max_rows} of {len(df)} rows.</p>"
+        )
+    else:
+        truncated_note = ""
+
+    cols = list(d.columns)
+    id_attr = f" id='{esc2(table_id)}'" if table_id else ""
+    parts = [f"<table class='data-table'{id_attr}>", "<thead><tr>"]
+    for c in cols:
+        parts.append(f"<th>{esc2(c)}</th>")
+    parts.append("</tr></thead><tbody>")
+    for _, row in d.iterrows():
+        parts.append("<tr>")
+        for c in cols:
+            val = row[c]
+            if isinstance(val, float):
+                val = "" if val != val else round(val, 4)  # NaN check
+            parts.append(f"<td>{esc2(val)}</td>")
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return truncated_note + "\n".join(parts)
+
+
+def img_block2(title, path, anchor_id=None):
+    b64 = img_to_b642(path)
+    id_attr = f" id='{esc2(anchor_id)}'" if anchor_id else ""
     if b64 is None:
-        return f'<p class="missing">[missing: {alt}]</p>'
-    return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="max-width:{max_width};height:auto;border:1px solid #ddd;border-radius:4px;">'
-
-def df_to_html_table(d, float_cols=None):
-    if d is None or len(d) == 0:
-        return "<p class='missing'>No data.</p>"
-    d = d.copy()
-    return d.to_html(index=False, classes="stat-table", border=0, na_rep="—")
-
-# --- QQ plot path lookup (per-group standalone, from section 7f-ii) ---
-qq_plot_paths = {}
-for (subtype_name, virus_name, day_val) in ols_results.keys():
-    vacc_status = vacc_label[(subtype_name, virus_name, day_val)]
-    p = os.path.join(
-        BASE_QQ_DIR, safe_name(subtype_name), safe_name(virus_name),
-        f"Day{int(day_val)}__{safe_name(vacc_status)}", "replication_qq_plot.png",
+        return (
+            f"<div class='plot-block'{id_attr}>"
+            f"<h3>{esc2(title)}</h3>"
+            f"<p class='note'>Image not found: {esc2(path)}</p></div>"
+        )
+    return (
+        f"<div class='plot-block'{id_attr}>"
+        f"<h3>{esc2(title)}</h3>"
+        f"<img src='{b64}' alt='{esc2(title)}' loading='lazy'/>"
+        f"</div>"
     )
-    qq_plot_paths[(subtype_name, virus_name, day_val)] = p
 
-# --- diagnostic plot path lookup ---
-diag_plot_paths = dict(zip(
-    zip(diag_df["Subtype"], diag_df["Virus"], diag_df["Day"]),
-    diag_df["Diagnostic_Plot_Path"],
-))
-diag_lookup = diag_df.set_index(["Subtype", "Virus", "Day"]).to_dict("index")
 
-CSS = """
-<style>
-  :root {
-    --blue: #4472C4; --orange: #ED7D31; --green: #70AD47;
-    --bg: #f7f8fa; --card: #ffffff; --border: #e2e5ea; --text: #1f2937;
-  }
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: var(--bg); color: var(--text); margin: 0; padding: 0;
-    line-height: 1.5;
-  }
-  header {
-    background: linear-gradient(135deg, #2c3e6b, #4472C4);
-    color: white; padding: 32px 40px;
-  }
-  header h1 { margin: 0 0 6px 0; font-size: 26px; }
-  header p { margin: 0; opacity: 0.85; font-size: 14px; }
-  nav.toc {
-    background: var(--card); margin: 20px 40px; padding: 20px 28px;
-    border: 1px solid var(--border); border-radius: 8px;
-  }
-  nav.toc h2 { margin-top: 0; font-size: 16px; text-transform: uppercase; letter-spacing: .05em; color: #555; }
-  nav.toc ul { columns: 3; column-gap: 24px; padding-left: 18px; }
-  nav.toc li { break-inside: avoid; margin-bottom: 4px; font-size: 13.5px; }
-  nav.toc a { color: var(--blue); text-decoration: none; }
-  nav.toc a:hover { text-decoration: underline; }
-  section.block { margin: 0 40px 36px 40px; }
-  h2.subtype-header {
-    background: #2c3e6b; color: white; padding: 12px 20px; border-radius: 6px;
-    font-size: 19px; margin-bottom: 18px; position: sticky; top: 0; z-index: 5;
-  }
-  h3.strain-header {
-    background: #dde5f5; padding: 10px 18px; border-left: 5px solid var(--blue);
-    border-radius: 4px; font-size: 16px; margin: 22px 0 12px 0;
-  }
-  .day-card {
-    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 20px; margin-bottom: 20px;
-  }
-  .day-card h4 { margin: 0 0 12px 0; font-size: 15px; color: #2c3e6b; }
-  .badge {
-    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
-    margin-left: 8px; font-weight: 600;
-  }
-  .badge.vacc { background: #d9f2e3; color: #1e7a46; }
-  .badge.notvacc { background: #f2e3d9; color: #a15c1e; }
-  .badge.skipped { background: #f0f0f0; color: #888; }
-  .badge.flag { background: #fde2e2; color: #b91c1c; }
-  .badge.ok { background: #e2f5e9; color: #157347; }
-  .img-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 14px; margin-top: 10px;
-  }
-  .img-grid figure { margin: 0; }
-  .img-grid figcaption { font-size: 12px; color: #666; margin-top: 4px; text-align: center; }
-  .stat-table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 8px; }
-  .stat-table th, .stat-table td { padding: 5px 10px; border-bottom: 1px solid #eee; text-align: right; }
-  .stat-table th { background: #f2f4f8; text-align: right; font-weight: 600; }
-  .stat-table td:first-child, .stat-table th:first-child { text-align: left; }
-  .diag-summary { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
-  .diag-pill { background: #f2f4f8; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12.5px; }
-  .missing { color: #aaa; font-style: italic; font-size: 13px; }
-  .overview-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-    gap: 18px;
-  }
-  .overview-grid figure { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 0; }
-  .overview-grid figcaption { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #2c3e6b; }
-  .back-to-top { font-size: 12px; }
-  .back-to-top a { color: var(--blue); text-decoration: none; }
-  footer { text-align: center; color: #999; font-size: 12px; padding: 30px; }
-</style>
+def slug2(*parts):
+    return safe_name2("_".join(str(p) for p in parts))
+
+
+# ---------------------------------------------------------------
+# Build TOC + sections
+# ---------------------------------------------------------------
+toc_items2 = []
+body_sections2 = []
+
+# --- Section: Overview plots (7a-7e) ---
+toc_items2.append("<li><a href='#sec-overview'>Overview Plots</a><ul>")
+overview_html2 = ["<h2 id='sec-overview'>Overview Plots</h2>"]
+for i, (title, path) in enumerate(overview_plot_paths):
+    anchor2 = f"ov-{i}-{slug2(title)}"
+    toc_items2.append(f"<li><a href='#{anchor2}'>{esc2(title)}</a></li>")
+    overview_html2.append(img_block2(title, path, anchor_id=anchor2))
+toc_items2.append("</ul></li>")
+body_sections2.append("\n".join(overview_html2))
+
+# --- Section: Strain-level annotation counts ---
+toc_items2.append("<li><a href='#sec-strain-counts'>Strain-Level Counts</a></li>")
+body_sections2.append(
+    "<h2 id='sec-strain-counts'>Strain-Level Annotation Counts</h2>"
+    "<p class='note'>Computed once, across all days/visits, per strain.</p>"
+    + df_to_html_table2(strain_counts)
+)
+
+# --- Section: Model choice log ---
+toc_items2.append("<li><a href='#sec-model-choice'>Model Choice Log</a></li>")
+body_sections2.append(
+    "<h2 id='sec-model-choice'>Model Choice Log</h2>"
+    + df_to_html_table2(choice_df, max_rows=500)
+)
+
+# --- Section: Variance decomposition table ---
+toc_items2.append("<li><a href='#sec-variance'>Variance Decomposition Table</a></li>")
+body_sections2.append(
+    "<h2 id='sec-variance'>Variance Decomposition Table</h2>"
+    + df_to_html_table2(vdf, max_rows=500)
+)
+
+# --- Section: Regression summary (coefficients) ---
+toc_items2.append("<li><a href='#sec-summary'>Regression Summary (OLS Coefficients)</a></li>")
+body_sections2.append(
+    "<h2 id='sec-summary'>Regression Summary (OLS Coefficients)</h2>"
+    + df_to_html_table2(summary_df, max_rows=1000)
+)
+
+# --- Section: Diagnostics summary ---
+if "diag_df" in globals() and len(diag_df) > 0:
+    toc_items2.append("<li><a href='#sec-diagnostics'>Regression Diagnostics Summary</a></li>")
+    diag_table_df2 = diag_df.drop(columns=["Diagnostic_Plot_Path"], errors="ignore")
+    body_sections2.append(
+        "<h2 id='sec-diagnostics'>Regression Diagnostics Summary</h2>"
+        + df_to_html_table2(diag_table_df2, max_rows=500)
+    )
+
+# --- Section: Per Subtype -> Strain -> Day (descriptive + diagnostic plots) ---
+toc_items2.append("<li><a href='#sec-bystrain'>By Subtype &rarr; Strain &rarr; Day</a><ul>")
+bystrain_html2 = ["<h2 id='sec-bystrain'>By Subtype &rarr; Strain &rarr; Day</h2>"]
+
+# Build lookup from diag_df for the diagnostic plot paths
+diag_lookup2 = {}
+if "diag_df" in globals():
+    for _, r in diag_df.iterrows():
+        diag_lookup2[(r["Subtype"], r["Virus"], r["Day"])] = r.get("Diagnostic_Plot_Path")
+
+# organize keys by subtype for nested TOC
+from collections import defaultdict
+by_subtype2 = defaultdict(list)
+for key in desc_plot_paths.keys():
+    subtype_name2, virus_name2, day_val2 = key
+    by_subtype2[subtype_name2].append(key)
+
+for subtype_name2 in sorted(by_subtype2.keys(), key=str):
+    subtype_anchor2 = f"subtype-{slug2(subtype_name2)}"
+    toc_items2.append(
+        f"<li><a href='#{subtype_anchor2}'>{esc2(subtype_name2)}</a><ul>"
+    )
+    bystrain_html2.append(f"<h3 id='{subtype_anchor2}'>Subtype: {esc2(subtype_name2)}</h3>")
+
+    # strain annotation block (once per strain within this subtype)
+    strains_in_subtype2 = sorted(
+        {k[1] for k in by_subtype2[subtype_name2]}, key=str
+    )
+    for virus_name2 in strains_in_subtype2:
+        ann_row2 = strain_counts[
+            (strain_counts["subtype"] == subtype_name2)
+            & (strain_counts["virus"] == virus_name2)
+        ]
+        if len(ann_row2):
+            r = ann_row2.iloc[0]
+            ann_text2 = (
+                f"N_Samples={r['N_Samples']} | N_Studies={r['N_Studies']} | "
+                f"N_Cohorts={r['N_Cohorts']} | N_Days={r['N_Days']}"
+            )
+        else:
+            ann_text2 = "N_Samples=? | N_Studies=? | N_Cohorts=? | N_Days=?"
+
+        strain_anchor2 = f"strain-{slug2(subtype_name2, virus_name2)}"
+        toc_items2.append(f"<li><a href='#{strain_anchor2}'>{esc2(virus_name2)}</a></li>")
+        bystrain_html2.append(
+            f"<div class='strain-block' id='{strain_anchor2}'>"
+            f"<h4>{esc2(virus_name2)}</h4>"
+            f"<p class='annotation'>{esc2(ann_text2)}</p>"
+        )
+
+        days_for_strain2 = sorted(
+            d for (s, v, d) in by_subtype2[subtype_name2] if v == virus_name2
+        )
+        for day_val2 in days_for_strain2:
+            key = (subtype_name2, virus_name2, day_val2)
+            desc_path2 = desc_plot_paths.get(key)
+            diag_path2 = diag_lookup2.get(key)
+
+            bystrain_html2.append(f"<div class='day-block'><h5>Day {esc2(day_val2)}</h5>")
+            bystrain_html2.append(
+                img_block2(f"Descriptive plots — Day {day_val2}", desc_path2)
+            )
+            if diag_path2:
+                bystrain_html2.append(
+                    img_block2(f"Regression diagnostics — Day {day_val2}", diag_path2)
+                )
+            bystrain_html2.append("</div>")  # day-block
+
+        bystrain_html2.append("</div>")  # strain-block
+
+    toc_items2.append("</ul></li>")
+
+toc_items2.append("</ul></li>")
+body_sections2.append("\n".join(bystrain_html2))
+
+
+# ---------------------------------------------------------------
+# Assemble final HTML
+# ---------------------------------------------------------------
+generated_at2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+CSS2 = """
+:root {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --border: #e2e5ea;
+  --text: #1f2430;
+  --muted: #667085;
+  --accent: #4472C4;
+  --accent2: #ED7D31;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+}
+#toc {
+  width: 300px;
+  min-width: 300px;
+  height: 100vh;
+  overflow-y: auto;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 20px 16px;
+  font-size: 13.5px;
+}
+#toc h1 {
+  font-size: 15px;
+  margin: 0 0 4px 0;
+}
+#toc .meta {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-bottom: 16px;
+}
+#toc ul {
+  list-style: none;
+  padding-left: 14px;
+  margin: 4px 0;
+}
+#toc > ul { padding-left: 0; }
+#toc li { margin: 3px 0; }
+#toc a {
+  color: var(--text);
+  text-decoration: none;
+}
+#toc a:hover { color: var(--accent); text-decoration: underline; }
+#content {
+  flex: 1;
+  padding: 28px 40px 80px 40px;
+  max-width: 1200px;
+}
+h2 {
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 6px;
+  margin-top: 48px;
+}
+h3 {
+  color: var(--accent);
+  margin-top: 36px;
+}
+h4 {
+  margin-top: 24px;
+  background: #eef1f8;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+}
+h5 {
+  margin-top: 16px;
+  color: var(--muted);
+}
+.annotation {
+  font-size: 13px;
+  color: var(--muted);
+  font-family: monospace;
+  background: #f0f1f4;
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.strain-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 18px 18px 18px;
+  margin: 16px 0;
+  background: var(--panel);
+}
+.day-block {
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+  margin-top: 14px;
+}
+.plot-block {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin: 16px 0;
+}
+.plot-block img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin-top: 8px;
+  border-radius: 4px;
+}
+.note {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-style: italic;
+}
+table.data-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  margin: 10px 0 24px 0;
+  background: var(--panel);
+}
+table.data-table th, table.data-table td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: left;
+  white-space: nowrap;
+}
+table.data-table th {
+  background: #eef1f8;
+  position: sticky;
+  top: 0;
+}
+table.data-table tr:nth-child(even) { background: #fafbfc; }
+.table-wrap {
+  overflow-x: auto;
+}
 """
 
-html_parts = []
-html_parts.append(f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
+html_doc2 = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
 <title>HAI Replication Regression Report</title>
-{CSS}
-</head><body>
-<a id="top"></a>
-<header>
-  <h1>HAI Covariate Regression — Replication Analysis Report</h1>
-  <p>Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} &nbsp;|&nbsp; Model: log2_HAI ~ age + sex (OLS) &nbsp;|&nbsp; N_Obs threshold: 19</p>
-</header>
-""")
-
-# ---------------- Table of Contents ----------------
-subtypes_sorted = sorted(clean["subtype"].dropna().unique())
-toc_items = ['<li><a href="#overview">Overview plots</a></li>']
-for st in subtypes_sorted:
-    toc_items.append(f'<li><a href="#subtype-{safe_name(st)}"><b>{st}</b></a></li>')
-    viruses_this = sorted(clean[clean["subtype"] == st]["virus"].dropna().unique())
-    for v in viruses_this:
-        toc_items.append(f'<li style="margin-left:14px;">&mdash; <a href="#strain-{safe_name(st)}-{safe_name(v)}">{v}</a></li>')
-
-html_parts.append(f"""
-<nav class="toc">
-  <h2>Contents</h2>
-  <ul>{''.join(toc_items)}</ul>
+<style>{CSS2}</style>
+</head>
+<body>
+<nav id="toc">
+  <h1>HAI Replication Report</h1>
+  <div class="meta">Generated {esc2(generated_at2)}</div>
+  <ul>
+    {"".join(toc_items2)}
+  </ul>
 </nav>
-""")
+<main id="content">
+  <h1>HAI Regression &amp; Variance Analysis</h1>
+  <p class="note">Organized by Subtype &rarr; Strain &rarr; Day. Generated {esc2(generated_at2)}.</p>
+  {"".join(f"<div class='table-wrap'>{s}</div>" if "<table" in s else s for s in body_sections2)}
+</main>
+</body>
+</html>
+"""
 
-# ---------------- Overview section ----------------
-html_parts.append('<section class="block"><a id="overview"></a><h2 class="subtype-header">Overview Plots</h2>')
-html_parts.append('<div class="overview-grid">')
-for title, path in overview_plot_paths:
-    html_parts.append(f'<figure><figcaption>{title}</figcaption>{img_tag(path, title)}</figure>')
-html_parts.append('</div></section>')
+with open(REPORT_PATH2, "w", encoding="utf-8") as f:
+    f.write(html_doc2)
 
-# ---------------- Per Subtype -> Strain -> Day ----------------
-for st in subtypes_sorted:
-    html_parts.append(f'<section class="block"><a id="subtype-{safe_name(st)}"></a>')
-    html_parts.append(f'<h2 class="subtype-header">Subtype: {st}</h2>')
-
-    viruses_this = sorted(clean[clean["subtype"] == st]["virus"].dropna().unique())
-    for virus_name in viruses_this:
-        ann = strain_annotation_text(virus_name)
-        html_parts.append(f'<a id="strain-{safe_name(st)}-{safe_name(virus_name)}"></a>')
-        html_parts.append(f'<h3 class="strain-header">{virus_name} &nbsp; <span style="font-weight:400;font-size:13px;color:#555;">({ann})</span></h3>')
-
-        days_this = sorted(clean[(clean["subtype"] == st) & (clean["virus"] == virus_name)]["day"].dropna().unique())
-        for day_val in days_this:
-            key = (st, virus_name, day_val)
-            n_obs = len(clean[(clean["subtype"] == st) & (clean["virus"] == virus_name) & (clean["day"] == day_val)])
-            vacc_status = vacc_label.get(key, "—")
-            vacc_badge_cls = "vacc" if vacc_status == "Vaccinated" else "notvacc"
-            has_model = key in ols_results
-            model_badge = '<span class="badge ok">OLS fit</span>' if has_model else '<span class="badge skipped">Skipped (n_obs&lt;19)</span>'
-
-            html_parts.append('<div class="day-card">')
-            html_parts.append(
-                f'<h4>Day {int(day_val)} '
-                f'<span class="badge {vacc_badge_cls}">{vacc_status}</span> '
-                f'{model_badge} '
-                f'<span class="badge" style="background:#eee;color:#555;">N={n_obs}</span></h4>'
-            )
-
-            # --- images: descriptive / diagnostics / QQ ---
-            html_parts.append('<div class="img-grid">')
-            desc_path = desc_plot_paths.get(key)
-            html_parts.append(f'<figure>{img_tag(desc_path, "Descriptive plots")}<figcaption>Descriptive (distribution / age vs HAI / sex)</figcaption></figure>')
-            if has_model:
-                diag_path = diag_plot_paths.get(key)
-                qq_path = qq_plot_paths.get(key)
-                html_parts.append(f'<figure>{img_tag(diag_path, "Diagnostic 4-panel")}<figcaption>Regression diagnostics (4-panel)</figcaption></figure>')
-                html_parts.append(f'<figure>{img_tag(qq_path, "QQ plot")}<figcaption>Normal Q-Q (standalone)</figcaption></figure>')
-            html_parts.append('</div>')
-
-            # --- diagnostic stat pills ---
-            if has_model and key in diag_lookup:
-                d = diag_lookup[key]
-                def flag(cond, text_ok, text_bad):
-                    if pd.isna(cond):
-                        return f'<span class="diag-pill">{text_ok.split(":")[0]}: n/a</span>'
-                    cls = "ok" if cond else "flag"
-                    txt = text_ok if cond else text_bad
-                    return f'<span class="diag-pill badge {cls}">{txt}</span>'
-
-                html_parts.append('<div class="diag-summary">')
-                html_parts.append(f'<span class="diag-pill">Shapiro-Wilk p={d["Shapiro_p"]}</span>')
-                html_parts.append(flag(d["Normal_Residuals"], "Residuals ~ Normal", "Residuals non-Normal"))
-                html_parts.append(f'<span class="diag-pill">Breusch-Pagan p={d["BreuschPagan_p"]}</span>')
-                html_parts.append(flag(d["Homoscedastic"], "Homoscedastic", "Heteroscedastic"))
-                html_parts.append(f'<span class="diag-pill">Durbin-Watson={d["DurbinWatson"]}</span>')
-                infl_cls = "flag" if d["N_Influential_CooksD"] > 0 else "ok"
-                html_parts.append(f'<span class="diag-pill badge {infl_cls}">{d["N_Influential_CooksD"]} influential pts (Cook\'s D)</span>')
-                html_parts.append('</div>')
-
-            # --- regression coefficient table ---
-            group_summary = summary_df[
-                (summary_df["Subtype"] == st) & (summary_df["Virus"] == virus_name) & (summary_df["Day"] == day_val)
-            ][["Term", "Estimate", "CI_low", "CI_high", "p_value"]]
-            if len(group_summary) > 0:
-                html_parts.append(df_to_html_table(group_summary))
-            else:
-                html_parts.append('<p class="missing">No model fit for this group (below N_Obs threshold).</p>')
-
-            html_parts.append('<p class="back-to-top"><a href="#top">↑ back to top</a></p>')
-            html_parts.append('</div>')  # day-card
-
-    html_parts.append('</section>')
-
-html_parts.append(f'<footer>HAI Replication Regression Report &middot; {len(ols_results)} models fit &middot; generated automatically</footer>')
-html_parts.append('</body></html>')
-
-report_path = os.path.join(OUTPUT_ROOT, "replication_hai_report.html")
-with open(report_path, "w", encoding="utf-8") as f:
-    f.write("\n".join(html_parts))
-
-print(f"\nHTML report saved to: {report_path}")
-print(f"Report size: {os.path.getsize(report_path) / 1e6:.1f} MB")
+print(f"\nHTML report written to: {REPORT_PATH2}")
 
