@@ -1967,13 +1967,13 @@ cali = h1n1[h1n1['Cohort for regression'] == '150 healthy adults, 50-74 yo']
 #h3n2
 h3n2 = post_df[(post_df['Virus'].isin(['A/Perth/16/2009', 'A/Victoria/361/2011']))]
 perth = h3n2[(h3n2['Virus'] == 'A/Perth/16/2009') & (h3n2['Cohort for regression'] == '150 healthy adults, 50-74 yo')]
-vic= h3n2[(h3n2['Virus'] == 'A/Victoria/361/2011') & (h3n2['Cohort for regression'] == 'Healthy Adults 2012 - 2013 ')]
+vic= h3n2[(h3n2['Virus'] == 'A/Victoria/361/2011') & (h3n2['Cohort for regression'] == 'Healthy Adults 2012 - 2013')]
 
 
 #victoria
 victoria = post_df[post_df['Virus'] == "B/Malaysia/2506/2004"] 
-malaysia = victoria[victoria['Cohort'] == 'Older participants aged 60 to 89 years, vaccinated with Fluzone']
- 
+malaysia = victoria[victoria['Cohort for regression'] == 'Older participants aged 60 to 89 years, vaccinated with Fluzone']
+
 
 
 #yamagata
@@ -2136,7 +2136,7 @@ for (subtype_name, virus_name, day_val), sub in clean.groupby(["subtype", "virus
     key = (subtype_name, virus_name, day_val)
     vacc_label[key] = vacc_status
 
-    if n_obs < 20:
+    if n_obs < 19:
         continue
 
     try:
@@ -2199,7 +2199,7 @@ for (subtype_name, virus_name, day_val), sub in clean.groupby(["subtype", "virus
         "Vaccinated": vacc_label.get(key, sub["vaccinated"].iloc[0]),
         "N_Obs": n_obs,
         "N_Cohorts": 1,
-        "Model_Used": "OLS" if key in ols_results else "Skipped (n_obs<20)",
+        "Model_Used": "OLS" if key in ols_results else "Skipped (n_obs<19)",
         "R2": round(r2, 4) if pd.notna(r2) else np.nan,
         "Residual_Unexplained_pct": round(100 * (1 - r2), 4) if pd.notna(r2) else np.nan,
     })
@@ -2703,8 +2703,6 @@ print(f"\nDescriptive plots saved under: {BASE_DESC_DIR}")
 
 
 
-# %%
-# %%
 # ---------------------------------------------------------------
 # PLOT: Scatter -- Residual Unexplained Variance % vs raw titer variability
 # One PNG for All data, then one PNG per subtype,
@@ -2850,4 +2848,363 @@ for subtype in plot_groups:
     plt.close(fig)
 
 print("Saved all plots.")
+
+
+
+
+
+
+
+# ---------------------------------------------------------------
+# 3b. REGRESSION DIAGNOSTICS per (subtype, virus, day) -- QQ plot,
+#     residuals vs fitted, scale-location, residuals vs leverage
+# ---------------------------------------------------------------
+from scipy import stats
+from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.stattools import durbin_watson
+from statsmodels.stats.outliers_influence import OLSInfluence
+
+BASE_DIAG_DIR = os.path.join(OUTPUT_ROOT, "replication_diagnostics_by_subtype_strain_day")
+os.makedirs(BASE_DIAG_DIR, exist_ok=True)
+
+diag_rows = []
+
+def plot_ols_diagnostics(fit, sub, label, out_dir):
+    resid = fit.resid
+    fitted = fit.fittedvalues
+    influence = OLSInfluence(fit)
+    std_resid = influence.resid_studentized_internal
+    leverage = influence.hat_matrix_diag
+    cooks_d = influence.cooks_distance[0]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # 1. Residuals vs Fitted
+    axes[0, 0].scatter(fitted, resid, alpha=0.5, color="#4472C4", edgecolor="black", linewidth=0.3)
+    axes[0, 0].axhline(0, color="red", ls="--", lw=1)
+    axes[0, 0].set_xlabel("Fitted values")
+    axes[0, 0].set_ylabel("Residuals")
+    axes[0, 0].set_title("Residuals vs Fitted")
+    # lowess trend line if enough points
+    if len(fitted) >= 10:
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess
+            sm_fit = lowess(resid, fitted, frac=0.6)
+            axes[0, 0].plot(sm_fit[:, 0], sm_fit[:, 1], color="orange", lw=1.5)
+        except Exception:
+            pass
+
+    # 2. QQ plot of standardized residuals
+    (osm, osr), (slope, intercept, r) = stats.probplot(std_resid, dist="norm")
+    axes[0, 1].scatter(osm, osr, alpha=0.6, color="#ED7D31", edgecolor="black", linewidth=0.3)
+    axes[0, 1].plot(osm, slope * osm + intercept, color="red", lw=1.5)
+    axes[0, 1].set_xlabel("Theoretical quantiles")
+    axes[0, 1].set_ylabel("Standardized residuals")
+    axes[0, 1].set_title("Normal Q-Q")
+
+    fig.suptitle(label, fontsize=11)
+    plt.tight_layout()
+
+    os.makedirs(out_dir, exist_ok=True)
+    fig_path = os.path.join(out_dir, "replication_diagnostic_plots.png")
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return fig_path
+
+
+for (subtype_name, virus_name, day_val), fit in ols_results.items():
+    sub = clean[
+        (clean["subtype"] == subtype_name)
+        & (clean["virus"] == virus_name)
+        & (clean["day"] == day_val)
+    ]
+    n_obs = len(sub)
+    vacc_status = vacc_label[(subtype_name, virus_name, day_val)]
+    label = f"{virus_name} | Subtype {subtype_name} | Day {day_val} | {vacc_status} | N={n_obs}"
+
+    out_dir = os.path.join(
+        BASE_DIAG_DIR, safe_name(subtype_name), safe_name(virus_name),
+        f"Day{int(day_val)}__{safe_name(vacc_status)}",
+    )
+    fig_path = plot_ols_diagnostics(fit, sub, label, out_dir)
+
+    # --- normality of residuals ---
+    shapiro_stat, shapiro_p = stats.shapiro(fit.resid) if n_obs <= 5000 else (np.nan, np.nan)
+
+    # --- heteroscedasticity (Breusch-Pagan) ---
+    try:
+        bp_stat, bp_p, _, _ = het_breuschpagan(fit.resid, fit.model.exog)
+    except Exception:
+        bp_stat, bp_p = np.nan, np.nan
+
+    # --- autocorrelation of residuals ---
+    dw_stat = durbin_watson(fit.resid)
+
+    # --- influential points ---
+    infl = OLSInfluence(fit)
+    cooks_d = infl.cooks_distance[0]
+    n_influential = int(np.sum(cooks_d > 4 / n_obs)) if n_obs > 0 else 0
+
+    diag_rows.append({
+        "Subtype": subtype_name,
+        "Virus": virus_name,
+        "Day": day_val,
+        "Vaccinated": vacc_status,
+        "N_Obs": n_obs,
+        "Shapiro_W": round(shapiro_stat, 4) if pd.notna(shapiro_stat) else np.nan,
+        "Shapiro_p": round(shapiro_p, 4) if pd.notna(shapiro_p) else np.nan,
+        "Normal_Residuals": (shapiro_p > 0.05) if pd.notna(shapiro_p) else np.nan,
+        "BreuschPagan_stat": round(bp_stat, 4) if pd.notna(bp_stat) else np.nan,
+        "BreuschPagan_p": round(bp_p, 4) if pd.notna(bp_p) else np.nan,
+        "Homoscedastic": (bp_p > 0.05) if pd.notna(bp_p) else np.nan,
+        "DurbinWatson": round(dw_stat, 4),
+        "N_Influential_CooksD": n_influential,
+        "Diagnostic_Plot_Path": fig_path,
+    })
+
+    print(f"Saved diagnostics: {fig_path}")
+
+diag_df = pd.DataFrame(diag_rows)
+diag_df.to_csv(os.path.join(OUTPUT_ROOT, "replication_regression_diagnostics_summary.csv"), index=False)
+print("\nDiagnostics summary:")
+print(diag_df.drop(columns=["Diagnostic_Plot_Path"]).to_string(index=False))
+
+# %%
+# ---------------------------------------------------------------
+# 9. BUILD SELF-CONTAINED HTML REPORT
+#    Organized: Overview -> Subtype -> Strain -> Day
+#    All images embedded as base64 so the report is a single
+#    portable file with no dependency on relative image paths.
+# ---------------------------------------------------------------
+import base64
+from datetime import datetime
+
+def img_to_b64(path):
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def img_tag(path, alt="", max_width="100%"):
+    b64 = img_to_b64(path)
+    if b64 is None:
+        return f'<p class="missing">[missing: {alt}]</p>'
+    return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="max-width:{max_width};height:auto;border:1px solid #ddd;border-radius:4px;">'
+
+def df_to_html_table(d, float_cols=None):
+    if d is None or len(d) == 0:
+        return "<p class='missing'>No data.</p>"
+    d = d.copy()
+    return d.to_html(index=False, classes="stat-table", border=0, na_rep="—")
+
+# --- QQ plot path lookup (per-group standalone, from section 7f-ii) ---
+qq_plot_paths = {}
+for (subtype_name, virus_name, day_val) in ols_results.keys():
+    vacc_status = vacc_label[(subtype_name, virus_name, day_val)]
+    p = os.path.join(
+        BASE_QQ_DIR, safe_name(subtype_name), safe_name(virus_name),
+        f"Day{int(day_val)}__{safe_name(vacc_status)}", "replication_qq_plot.png",
+    )
+    qq_plot_paths[(subtype_name, virus_name, day_val)] = p
+
+# --- diagnostic plot path lookup ---
+diag_plot_paths = dict(zip(
+    zip(diag_df["Subtype"], diag_df["Virus"], diag_df["Day"]),
+    diag_df["Diagnostic_Plot_Path"],
+))
+diag_lookup = diag_df.set_index(["Subtype", "Virus", "Day"]).to_dict("index")
+
+CSS = """
+<style>
+  :root {
+    --blue: #4472C4; --orange: #ED7D31; --green: #70AD47;
+    --bg: #f7f8fa; --card: #ffffff; --border: #e2e5ea; --text: #1f2937;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); margin: 0; padding: 0;
+    line-height: 1.5;
+  }
+  header {
+    background: linear-gradient(135deg, #2c3e6b, #4472C4);
+    color: white; padding: 32px 40px;
+  }
+  header h1 { margin: 0 0 6px 0; font-size: 26px; }
+  header p { margin: 0; opacity: 0.85; font-size: 14px; }
+  nav.toc {
+    background: var(--card); margin: 20px 40px; padding: 20px 28px;
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  nav.toc h2 { margin-top: 0; font-size: 16px; text-transform: uppercase; letter-spacing: .05em; color: #555; }
+  nav.toc ul { columns: 3; column-gap: 24px; padding-left: 18px; }
+  nav.toc li { break-inside: avoid; margin-bottom: 4px; font-size: 13.5px; }
+  nav.toc a { color: var(--blue); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section.block { margin: 0 40px 36px 40px; }
+  h2.subtype-header {
+    background: #2c3e6b; color: white; padding: 12px 20px; border-radius: 6px;
+    font-size: 19px; margin-bottom: 18px; position: sticky; top: 0; z-index: 5;
+  }
+  h3.strain-header {
+    background: #dde5f5; padding: 10px 18px; border-left: 5px solid var(--blue);
+    border-radius: 4px; font-size: 16px; margin: 22px 0 12px 0;
+  }
+  .day-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px; margin-bottom: 20px;
+  }
+  .day-card h4 { margin: 0 0 12px 0; font-size: 15px; color: #2c3e6b; }
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    margin-left: 8px; font-weight: 600;
+  }
+  .badge.vacc { background: #d9f2e3; color: #1e7a46; }
+  .badge.notvacc { background: #f2e3d9; color: #a15c1e; }
+  .badge.skipped { background: #f0f0f0; color: #888; }
+  .badge.flag { background: #fde2e2; color: #b91c1c; }
+  .badge.ok { background: #e2f5e9; color: #157347; }
+  .img-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 14px; margin-top: 10px;
+  }
+  .img-grid figure { margin: 0; }
+  .img-grid figcaption { font-size: 12px; color: #666; margin-top: 4px; text-align: center; }
+  .stat-table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 8px; }
+  .stat-table th, .stat-table td { padding: 5px 10px; border-bottom: 1px solid #eee; text-align: right; }
+  .stat-table th { background: #f2f4f8; text-align: right; font-weight: 600; }
+  .stat-table td:first-child, .stat-table th:first-child { text-align: left; }
+  .diag-summary { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+  .diag-pill { background: #f2f4f8; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12.5px; }
+  .missing { color: #aaa; font-style: italic; font-size: 13px; }
+  .overview-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 18px;
+  }
+  .overview-grid figure { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 0; }
+  .overview-grid figcaption { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #2c3e6b; }
+  .back-to-top { font-size: 12px; }
+  .back-to-top a { color: var(--blue); text-decoration: none; }
+  footer { text-align: center; color: #999; font-size: 12px; padding: 30px; }
+</style>
+"""
+
+html_parts = []
+html_parts.append(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>HAI Replication Regression Report</title>
+{CSS}
+</head><body>
+<a id="top"></a>
+<header>
+  <h1>HAI Covariate Regression — Replication Analysis Report</h1>
+  <p>Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} &nbsp;|&nbsp; Model: log2_HAI ~ age + sex (OLS) &nbsp;|&nbsp; N_Obs threshold: 19</p>
+</header>
+""")
+
+# ---------------- Table of Contents ----------------
+subtypes_sorted = sorted(clean["subtype"].dropna().unique())
+toc_items = ['<li><a href="#overview">Overview plots</a></li>']
+for st in subtypes_sorted:
+    toc_items.append(f'<li><a href="#subtype-{safe_name(st)}"><b>{st}</b></a></li>')
+    viruses_this = sorted(clean[clean["subtype"] == st]["virus"].dropna().unique())
+    for v in viruses_this:
+        toc_items.append(f'<li style="margin-left:14px;">&mdash; <a href="#strain-{safe_name(st)}-{safe_name(v)}">{v}</a></li>')
+
+html_parts.append(f"""
+<nav class="toc">
+  <h2>Contents</h2>
+  <ul>{''.join(toc_items)}</ul>
+</nav>
+""")
+
+# ---------------- Overview section ----------------
+html_parts.append('<section class="block"><a id="overview"></a><h2 class="subtype-header">Overview Plots</h2>')
+html_parts.append('<div class="overview-grid">')
+for title, path in overview_plot_paths:
+    html_parts.append(f'<figure><figcaption>{title}</figcaption>{img_tag(path, title)}</figure>')
+html_parts.append('</div></section>')
+
+# ---------------- Per Subtype -> Strain -> Day ----------------
+for st in subtypes_sorted:
+    html_parts.append(f'<section class="block"><a id="subtype-{safe_name(st)}"></a>')
+    html_parts.append(f'<h2 class="subtype-header">Subtype: {st}</h2>')
+
+    viruses_this = sorted(clean[clean["subtype"] == st]["virus"].dropna().unique())
+    for virus_name in viruses_this:
+        ann = strain_annotation_text(virus_name)
+        html_parts.append(f'<a id="strain-{safe_name(st)}-{safe_name(virus_name)}"></a>')
+        html_parts.append(f'<h3 class="strain-header">{virus_name} &nbsp; <span style="font-weight:400;font-size:13px;color:#555;">({ann})</span></h3>')
+
+        days_this = sorted(clean[(clean["subtype"] == st) & (clean["virus"] == virus_name)]["day"].dropna().unique())
+        for day_val in days_this:
+            key = (st, virus_name, day_val)
+            n_obs = len(clean[(clean["subtype"] == st) & (clean["virus"] == virus_name) & (clean["day"] == day_val)])
+            vacc_status = vacc_label.get(key, "—")
+            vacc_badge_cls = "vacc" if vacc_status == "Vaccinated" else "notvacc"
+            has_model = key in ols_results
+            model_badge = '<span class="badge ok">OLS fit</span>' if has_model else '<span class="badge skipped">Skipped (n_obs&lt;19)</span>'
+
+            html_parts.append('<div class="day-card">')
+            html_parts.append(
+                f'<h4>Day {int(day_val)} '
+                f'<span class="badge {vacc_badge_cls}">{vacc_status}</span> '
+                f'{model_badge} '
+                f'<span class="badge" style="background:#eee;color:#555;">N={n_obs}</span></h4>'
+            )
+
+            # --- images: descriptive / diagnostics / QQ ---
+            html_parts.append('<div class="img-grid">')
+            desc_path = desc_plot_paths.get(key)
+            html_parts.append(f'<figure>{img_tag(desc_path, "Descriptive plots")}<figcaption>Descriptive (distribution / age vs HAI / sex)</figcaption></figure>')
+            if has_model:
+                diag_path = diag_plot_paths.get(key)
+                qq_path = qq_plot_paths.get(key)
+                html_parts.append(f'<figure>{img_tag(diag_path, "Diagnostic 4-panel")}<figcaption>Regression diagnostics (4-panel)</figcaption></figure>')
+                html_parts.append(f'<figure>{img_tag(qq_path, "QQ plot")}<figcaption>Normal Q-Q (standalone)</figcaption></figure>')
+            html_parts.append('</div>')
+
+            # --- diagnostic stat pills ---
+            if has_model and key in diag_lookup:
+                d = diag_lookup[key]
+                def flag(cond, text_ok, text_bad):
+                    if pd.isna(cond):
+                        return f'<span class="diag-pill">{text_ok.split(":")[0]}: n/a</span>'
+                    cls = "ok" if cond else "flag"
+                    txt = text_ok if cond else text_bad
+                    return f'<span class="diag-pill badge {cls}">{txt}</span>'
+
+                html_parts.append('<div class="diag-summary">')
+                html_parts.append(f'<span class="diag-pill">Shapiro-Wilk p={d["Shapiro_p"]}</span>')
+                html_parts.append(flag(d["Normal_Residuals"], "Residuals ~ Normal", "Residuals non-Normal"))
+                html_parts.append(f'<span class="diag-pill">Breusch-Pagan p={d["BreuschPagan_p"]}</span>')
+                html_parts.append(flag(d["Homoscedastic"], "Homoscedastic", "Heteroscedastic"))
+                html_parts.append(f'<span class="diag-pill">Durbin-Watson={d["DurbinWatson"]}</span>')
+                infl_cls = "flag" if d["N_Influential_CooksD"] > 0 else "ok"
+                html_parts.append(f'<span class="diag-pill badge {infl_cls}">{d["N_Influential_CooksD"]} influential pts (Cook\'s D)</span>')
+                html_parts.append('</div>')
+
+            # --- regression coefficient table ---
+            group_summary = summary_df[
+                (summary_df["Subtype"] == st) & (summary_df["Virus"] == virus_name) & (summary_df["Day"] == day_val)
+            ][["Term", "Estimate", "CI_low", "CI_high", "p_value"]]
+            if len(group_summary) > 0:
+                html_parts.append(df_to_html_table(group_summary))
+            else:
+                html_parts.append('<p class="missing">No model fit for this group (below N_Obs threshold).</p>')
+
+            html_parts.append('<p class="back-to-top"><a href="#top">↑ back to top</a></p>')
+            html_parts.append('</div>')  # day-card
+
+    html_parts.append('</section>')
+
+html_parts.append(f'<footer>HAI Replication Regression Report &middot; {len(ols_results)} models fit &middot; generated automatically</footer>')
+html_parts.append('</body></html>')
+
+report_path = os.path.join(OUTPUT_ROOT, "replication_hai_report.html")
+with open(report_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(html_parts))
+
+print(f"\nHTML report saved to: {report_path}")
+print(f"Report size: {os.path.getsize(report_path) / 1e6:.1f} MB")
 

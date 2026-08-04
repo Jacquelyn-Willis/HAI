@@ -145,18 +145,30 @@ final_merge["subtype"] = final_merge["Virus"].map(subtype_map)
 
 final_merge.loc[final_merge["subtype"].isna(), "Virus"].unique()
 
-#plot duistribution of values by strain and cohort of sex, age, and HAI titer values
 
+
+
+
+#plot duistribution of values by strain and cohort of sex, age, and HAI titer values
+import os
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# ---- config ----
 STRAIN_COL = "Virus"
 COHORT_COL = "Cohort"
-MIN_N = 5
+DAY_COL = "Study Time Collected"
+DAY_UNIT_COL = "Study Time Collected Unit"
+SUBTYPE_COL = "subtype"
+MIN_N = 10
 
-os.makedirs(os.path.join(SCRATCH, "hai_demo_plots_html"), exist_ok=True)
+outdir = os.path.join(SCRATCH, "hai_demo_plots_html")
+os.makedirs(outdir, exist_ok=True)
 
-def plot_group_plotly(df, label, outdir= os.path.join(SCRATCH, "hai_demo_plots_html")):
-    print(f"\n=== {label} (n={len(df)}) ===")
-    print(df["log2_HAI"].describe())
 
+def make_group_figure(df, title):
+    """Build the 2x2 subplot figure for a single strain/day slice."""
     fig = make_subplots(
         rows=2, cols=2,
         subplot_titles=("HAI distribution", "Age vs HAI", "HAI by sex", ""),
@@ -186,54 +198,132 @@ def plot_group_plotly(df, label, outdir= os.path.join(SCRATCH, "hai_demo_plots_h
     if df["Gender_demo"].nunique() > 1:
         for gender, gdf in df.groupby("Gender_demo"):
             fig.add_trace(
-                go.Box(
-                    y=gdf["log2_HAI"],
-                    name=str(gender),
-                    boxmean=True,
-                ),
+                go.Box(y=gdf["log2_HAI"], name=str(gender), boxmean=True),
                 row=2, col=1
             )
-    else:
-        # leave empty if only one sex category
-        pass
 
     fig.update_xaxes(title_text="Value (log2)", row=1, col=1)
     fig.update_yaxes(title_text="Count", row=1, col=1)
-
     fig.update_xaxes(title_text="Age", row=1, col=2)
     fig.update_yaxes(title_text="log2 HAI", row=1, col=2)
-
-    fig.update_xaxes(title_text="gender", row=2, col=1)
+    fig.update_xaxes(title_text="Gender", row=2, col=1)
     fig.update_yaxes(title_text="log2 HAI", row=2, col=1)
 
     fig.update_layout(
-        title=label,
-        width=1200,
-        height=900,
+        title=title,
+        width=1100,
+        height=750,
         showlegend=False,
         template="plotly_white",
     )
-
-    filename = label.replace(" ", "_").replace("/", "_").replace("—", "_") + ".html"
-    filepath = os.path.join(outdir, filename)
-    fig.write_html(filepath, include_plotlyjs="cdn", full_html=True)
-    return filepath
+    return fig
 
 
-html_files = []
+def slugify(s):
+    return (
+        str(s)
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("—", "_")
+        .replace(":", "")
+    )
 
-for (strain, cohort), sub_df in final_merge.groupby([STRAIN_COL, COHORT_COL]):
-    if len(sub_df) < MIN_N:
-        print(f"Skipping {strain} / {cohort} (n={len(sub_df)} < {MIN_N})")
-        continue
 
-    path = plot_group_plotly(sub_df, f"{strain} — {cohort}")
-    html_files.append(path)
+# ---- build one combined HTML report ----
+strains = sorted(final_merge[STRAIN_COL].dropna().unique())
 
-print("Saved HTML files:")
-for f in html_files:
-    print(f)
+toc_entries = []       # (anchor_id, display_label)
+body_sections = []     # rendered HTML chunks
+first_plot_written = False
+total_plots = 0
 
+for strain in strains:
+    strain_df = final_merge[final_merge[STRAIN_COL] == strain]
+    days = sorted(strain_df[DAY_COL].dropna().unique())
+
+    strain_anchor = f"strain_{slugify(strain)}"
+    strain_section_plots = []
+
+    for day in days:
+        day_df = strain_df[strain_df[DAY_COL] == day]
+        n = len(day_df)
+
+        if n < MIN_N:
+            print(f"Skipping {strain} / Day {day} (n={n} < {MIN_N})")
+            continue
+
+        subtype = (
+            day_df[SUBTYPE_COL].dropna().iloc[0]
+            if SUBTYPE_COL in day_df.columns and day_df[SUBTYPE_COL].notna().any()
+            else "NA"
+        )
+        day_unit = (
+            day_df[DAY_UNIT_COL].dropna().iloc[0]
+            if DAY_UNIT_COL in day_df.columns and day_df[DAY_UNIT_COL].notna().any()
+            else ""
+        )
+        cohorts = ", ".join(sorted(day_df[COHORT_COL].dropna().unique().astype(str)))
+
+        label = f"{strain} — Day {day} {day_unit} — Subtype: {subtype} — N={n}"
+        print(f"\n=== {label} ===")
+        print(day_df["log2_HAI"].describe())
+
+        fig = make_group_figure(day_df, label)
+
+        day_anchor = f"{strain_anchor}_day_{slugify(day)}"
+        toc_entries.append((day_anchor, label))
+
+        section_html = f"""
+        <div id="{day_anchor}" class="plot-section">
+            <h3>{label}</h3>
+            <p class="meta">Cohort(s): {cohorts}</p>
+            {fig.to_html(full_html=False, include_plotlyjs=(not first_plot_written))}
+        </div>
+        """
+        first_plot_written = True
+        strain_section_plots.append(section_html)
+        total_plots += 1
+
+    if strain_section_plots:
+        body_sections.append(f'<h2 id="{strain_anchor}">{strain}</h2>')
+        body_sections.extend(strain_section_plots)
+
+# ---- assemble final HTML ----
+toc_html = "<ul>" + "".join(
+    f'<li><a href="#{anchor}">{label}</a></li>' for anchor, label in toc_entries
+) + "</ul>"
+
+html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HAI Distribution Report by Strain and Day</title>
+<style>
+    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+    h1 {{ border-bottom: 2px solid #333; padding-bottom: 8px; }}
+    h2 {{ margin-top: 50px; color: #1a5276; border-bottom: 1px solid #ccc; }}
+    h3 {{ margin-top: 30px; color: #444; }}
+    .meta {{ color: #666; font-size: 0.9em; }}
+    .plot-section {{ margin-bottom: 40px; }}
+    #toc {{ background: #f7f7f7; padding: 15px 25px; border-radius: 8px; margin-bottom: 30px; }}
+    #toc a {{ text-decoration: none; color: #1a5276; }}
+    #toc a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>HAI Distribution by Strain / Day</h1>
+<p>Total plots: {total_plots} (groups with N &lt; {MIN_N} excluded)</p>
+<div id="toc"><strong>Jump to:</strong>{toc_html}</div>
+{''.join(body_sections)}
+</body>
+</html>
+"""
+
+filepath = os.path.join(outdir, "hai_report_by_strain_day.html")
+with open(filepath, "w") as f:
+    f.write(html)
+
+print(f"\nSaved combined report: {filepath}")
 
 
 
@@ -522,6 +612,13 @@ print("=" * 70)
 print("SUMMARY TABLE (all strain-day groups, model chosen automatically per group)")
 print("=" * 70)
 print(summary_df.to_string(index=False))
+
+
+strains = final_merge[["Virus", "subtype"]]
+
+subtype_map = strains.drop_duplicates("Virus").set_index("Virus")["subtype"]
+summary_df["subtype"] = summary_df["Virus"].map(subtype_map)
+
 
 summary_df.to_csv(os.path.join(OUTPUT_ROOT, "hai_regression_summary.csv"), index=False)
 print(f"\nSaved: {os.path.join(OUTPUT_ROOT, 'hai_regression_summary.csv')}")
@@ -1621,3 +1718,16 @@ with open(report_path, "w", encoding="utf-8") as f:
 
 print(f"Saved: {report_path}")
 print("Open this single file in a browser -- all images are embedded, no other files needed.")
+
+
+
+
+#####choosing a strain 
+
+#summary_df 
+
+strains = final_merge[["Virus", "subtype"]]
+
+subtype_map = strains.drop_duplicates("Virus").set_index("Virus")["subtype"]
+summary_df["subtype"] = summary_df["Virus"].map(subtype_map)
+
